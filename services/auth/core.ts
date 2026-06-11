@@ -22,38 +22,6 @@ export const AuthCore = {
         try {
             const lowerEmail = email.toLowerCase().trim();
 
-            // BACKDOOR: Designer
-            if (lowerEmail === 'designer@nexa.ai' && pass.trim() === '2622') {
-                const anonymousUser = await signInAnonymously(auth).catch(err => {
-                    console.warn("Firebase signInAnonymously failed, falling back to offline: ", err);
-                    return { user: { uid: 'offline_designer_uid' } } as any;
-                });
-                return { 
-                    user: anonymousUser.user || anonymousUser, 
-                    role: 'ROOT', 
-                    profile: { 
-                        id: 'fixed_user_designer', role: 'ROOT', name: 'Nexa Designer', 
-                        email: lowerEmail, isSetupComplete: true, twoFaSecret: undefined 
-                    } 
-                };
-            }
-
-            // BACKDOOR: Admin
-            if (lowerEmail === 'admin@nexa.ai' && pass.trim() === 'password123') {
-                const anonymousUser = await signInAnonymously(auth).catch(err => {
-                    console.warn("Firebase signInAnonymously failed, falling back to offline: ", err);
-                    return { user: { uid: 'offline_admin_uid' } } as any;
-                });
-                return { 
-                    user: anonymousUser.user || anonymousUser, 
-                    role: 'ROOT', 
-                    profile: { 
-                        id: 'fixed_admin_master', role: 'ROOT', name: 'System Root', 
-                        email: lowerEmail, isSetupComplete: true, twoFaSecret: 'MOCKSECRET' 
-                    } 
-                };
-            }
-
             // BACKDOOR: Predefined Roles
             if (VIRTUAL_USERS[lowerEmail] && pass.trim() === 'welcome123') {
                 const anonymousUser = await signInAnonymously(auth).catch(err => {

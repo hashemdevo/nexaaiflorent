@@ -1,15 +1,15 @@
 
 import { DbEngine } from '../core/db';
 import { Payment, Invoice, Customer } from '../core/types';
-import { JournalService } from '../ledger/journal';
-import { JournalEntryLine } from '../../types';
+import { generateUUIDv7 } from '../../types/enterprise';
+import { EventBus } from '../core/events';
 
 export const PaymentService = {
     async recordPayment(
         invoiceId: string,
         amount: number,
         method: string,
-        depositAccountId: string = '1010' // Default to Cash
+        tenantId: string = 'tenant-nexa-001'
     ): Promise<Payment> {
         const trx = await DbEngine.startTransaction();
 
@@ -23,10 +23,12 @@ export const PaymentService = {
                 throw new Error("Payment amount exceeds balance due");
             }
 
+            const paymentId = generateUUIDv7();
+
             // 2. Create Payment Record
             const payment: Payment = {
-                id: `pay-${Date.now()}`,
-                tenantId: 'default',
+                id: paymentId,
+                tenantId: tenantId,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1,
@@ -34,59 +36,44 @@ export const PaymentService = {
                 customerId: invoice.customerId,
                 amount,
                 date: new Date().toISOString().split('T')[0],
-                method,
-                depositAccountId
+                method
             };
 
-            // 3. Prepare GL Lines
-            // Debit: Cash/Bank (Asset)
-            // Credit: Accounts Receivable (Asset)
-            const glLines: JournalEntryLine[] = [
-                {
-                    accountId: depositAccountId,
-                    accountName: 'Cash/Bank',
-                    debit: amount,
-                    credit: 0
-                },
-                {
-                    accountId: '1200', // AR Account
-                    accountName: 'Accounts Receivable',
-                    debit: 0,
-                    credit: amount
-                }
-            ];
-
-            // 4. Post Journal Entry
-            const journalEntry = await JournalService.postEntry({
-                transactionDate: payment.date,
-                postedDate: new Date().toISOString(),
-                reference: `PAY-${invoice.invoiceNumber}`,
-                description: `Payment received for Invoice ${invoice.invoiceNumber}`,
-                lines: glLines,
-                totalAmount: amount,
-                createdBy: 'SYSTEM'
-            }, trx);
-
-            payment.journalEntryId = journalEntry.id;
-
-            // 5. Update Invoice Balance & Status
+            // 3. Update Invoice Balance & Status
             const newBalance = invoice.balanceDue - amount;
             const newStatus = newBalance <= 0 ? 'PAID' : 'POSTED';
             
             await DbEngine.update<Invoice>('invoices', invoiceId, { 
                 balanceDue: newBalance,
                 status: newStatus
-            }, trx);
+            } as any, trx);
 
-            // 6. Update Customer Balance
+            // 4. Update Customer Balance
             const customerRows = await DbEngine.select<any>('customers', { where: { id: invoice.customerId } });
             if (customerRows.length > 0) {
                 const customer = customerRows[0];
-                await DbEngine.update<Customer>('customers', invoice.customerId, { balance: (customer.balance || 0) - amount }, trx);
+                await DbEngine.update<Customer>('customers', invoice.customerId, { balance: (customer.balance || 0) - amount } as any, trx);
             }
 
-            // 7. Save Payment
-            await DbEngine.insert('payments', payment, trx);
+            // 5. Save Payment
+            await DbEngine.insert('payments', payment as any, trx);
+
+            // 6. Publish Outbox Event for Accounting Domain
+            await EventBus.publish(
+                'PAYMENT_RECEIVED',
+                'Payment',
+                paymentId,
+                {
+                    paymentId,
+                    invoiceId,
+                    customerId: invoice.customerId,
+                    amount,
+                    method,
+                    date: payment.date
+                },
+                tenantId,
+                trx
+            );
 
             await trx.commit();
             return payment;

@@ -37,70 +37,119 @@ export interface PostgreSQLQueryResult {
 export const postgresQueryLogs: PostgresQueryLog[] = [];
 
 // Helper to execute CRUD operations securely against our Express backend
+
+class RequestQueue {
+    private queue: (() => Promise<void>)[] = [];
+    private active = 0;
+    private maxConcurrent = 1;
+
+    async enqueue<T>(task: () => Promise<T>): Promise<T> {
+        return new Promise<T>((resolve, reject) => {
+            this.queue.push(async () => {
+                try {
+                    const result = await task();
+                    resolve(result);
+                } catch (e) {
+                    reject(e);
+                } finally {
+                    this.active--;
+                    setTimeout(() => this.dequeue(), 350); // 350ms delay to prevent 429 rate limit
+                }
+            });
+            this.dequeue();
+        });
+    }
+
+    private dequeue() {
+        if (this.active >= this.maxConcurrent || this.queue.length === 0) return;
+        this.active++;
+        const next = this.queue.shift();
+        if (next) next();
+    }
+}
+
+const dbReqQueue = new RequestQueue();
+
 async function execCrud(operation: string, table: string, payload?: any, id?: string, options?: any): Promise<PostgreSQLQueryResult> {
-    const start = Date.now();
-    try {
-        let userRole = "ACCOUNTANT";
-        let userEmployeeId = "emp-sc-001";
-        
-        let baseUrl = "http://localhost:3000";
-        if (typeof window !== "undefined") {
-            baseUrl = "";
-            if (window.localStorage) {
-                userRole = window.localStorage.getItem("currentUserRole") || "ACCOUNTANT";
-                userEmployeeId = window.localStorage.getItem("currentUserEmployeeId") || "emp-sc-001";
+    return dbReqQueue.enqueue(async () => {
+        let retries = 10;
+        while (retries > 0) {
+            const start = Date.now();
+            try {
+                let userRole = "ACCOUNTANT";
+                let userEmployeeId = "emp-sc-001";
+                
+                let baseUrl = "http://localhost:3000";
+                if (typeof window !== "undefined") {
+                    baseUrl = "";
+                    if (window.localStorage) {
+                        userRole = window.localStorage.getItem("currentUserRole") || "ACCOUNTANT";
+                        userEmployeeId = window.localStorage.getItem("currentUserEmployeeId") || "emp-sc-001";
+                    }
+                }
+
+                const res = await fetch(`${baseUrl}/api/db/crud`, {
+                    method: "POST",
+                    headers: { 
+                      "Content-Type": "application/json",
+                      "X-User-Role": userRole,
+                      "X-Employee-ID": userEmployeeId
+                    },
+                    body: JSON.stringify({ operation, table, payload, id, options })
+                });
+                
+                if (!res.ok) {
+                   const errText = await res.text();
+                   if (res.status === 429) {
+                       throw new Error(`RateLimited: ${errText}`);
+                   }
+                   throw new Error(`HTTP ${res.status}: ${errText}`);
+                }
+                
+                const data = await res.json();
+
+                const durationMs = Date.now() - start;
+                
+                if (data.status === "ERROR") {
+                    throw new Error(data.error);
+                }
+                
+                postgresQueryLogs.unshift({
+                    id: generateUUIDv7(),
+                    query: `[${operation}] on ${table}`,
+                    timestamp: new Date().toISOString(),
+                    durationMs,
+                    status: 'SUCCESS'
+                });
+                
+                return data as PostgreSQLQueryResult;
+            } catch(err: any) {
+                if ((err.message.includes('RateLimited') || err.message.includes('429')) && retries > 1) {
+                    retries--;
+                    console.warn(`[DbEngine] Hit Rate Limit (429). Retrying... (${retries} attempts left)`);
+                    const backoffMs = (10 - retries) * 2000; // 2s, 4s, 6s...
+                    await new Promise(r => setTimeout(r, backoffMs));
+                    continue;
+                }
+                postgresQueryLogs.unshift({
+                    id: generateUUIDv7(),
+                    query: `[${operation}] on ${table}`,
+                    timestamp: new Date().toISOString(),
+                    durationMs: Date.now() - start,
+                    status: 'ERROR',
+                    error: err.message
+                });
+                throw err;
             }
         }
-
-        const res = await fetch(`${baseUrl}/api/db/crud`, {
-            method: "POST",
-            headers: { 
-              "Content-Type": "application/json",
-              "X-User-Role": userRole,
-              "X-Employee-ID": userEmployeeId
-            },
-            body: JSON.stringify({ operation, table, payload, id, options })
-        });
-        
-        if (!res.ok) {
-           const errText = await res.text();
-           throw new Error(`HTTP ${res.status}: ${errText}`);
-        }
-        
-        const data = await res.json();
-
-        const durationMs = Date.now() - start;
-        
-        if (data.status === "ERROR") {
-            throw new Error(data.error);
-        }
-        
-        postgresQueryLogs.unshift({
-            id: generateUUIDv7(),
-            query: `[${operation}] on ${table}`,
-            timestamp: new Date().toISOString(),
-            durationMs,
-            status: 'SUCCESS'
-        });
-        
-        return data as PostgreSQLQueryResult;
-    } catch(err: any) {
-        postgresQueryLogs.unshift({
-            id: generateUUIDv7(),
-            query: `[${operation}] on ${table}`,
-            timestamp: new Date().toISOString(),
-            durationMs: Date.now() - start,
-            status: 'ERROR',
-            error: err.message
-        });
-        throw err;
-    }
+        throw new Error("Maximum retries reached for DB operation");
+    });
 }
 
 export const DbEngine = {
   async startTransaction(): Promise<DbTransaction> {
     const tx = {
-      id: `tx-${Date.now()}`,
+      id: `tx-${generateUUIDv7()}`,
       operations: [] as any[],
       status: "PENDING" as any,
       commit: async () => {

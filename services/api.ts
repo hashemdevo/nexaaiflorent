@@ -11,6 +11,7 @@ import { ListenerRegistry } from './listeners';
 import { DatabaseSeeder } from './core/seeder';
 
 // Modules
+import * as FinancialDimensions from './financial_dimensions';
 import * as Ledger from './ledger';
 import * as Sales from './sales';
 import * as Purchasing from './purchasing';
@@ -97,6 +98,7 @@ export const Nexa = {
     },
 
     // Financial Core
+    FinancialDimensions: FinancialDimensions,
     Ledger: {
         Journal: Ledger.JournalService,
         Accounts: Ledger.AccountService,
@@ -155,7 +157,8 @@ export const Nexa = {
         Departments: HRM.DepartmentService,
         Leave: HRM.LeaveService,
         Reviews: HRM.PerformanceReviewService,
-        Payroll: Payroll.PayRunService
+        Payroll: Payroll.PayRunService,
+        Attendance: HRM.AttendanceService
     },
     Expenses: {
         Claims: Expenses.ExpenseClaimService,

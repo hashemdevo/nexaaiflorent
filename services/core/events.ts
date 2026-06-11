@@ -1,28 +1,41 @@
 
-type EventHandler = (payload: any) => void;
+import { DbEngine } from './db';
+import { generateUUIDv7 } from '../../types/enterprise';
+import { DbTransaction } from './types';
+
+export interface OutboxEvent {
+    id: string;
+    type: string;
+    aggregateId: string;
+    aggregateType: string;
+    payload: any;
+    occurredOn: string;
+    status: 'PENDING' | 'PROCESSED' | 'FAILED';
+    error?: string;
+    tenantId: string;
+}
 
 export const EventBus = {
-    events: {} as Record<string, EventHandler[]>,
-
-    on(event: string, handler: EventHandler) {
-        if (!this.events[event]) {
-            this.events[event] = [];
-        }
-        this.events[event].push(handler);
-    },
-
-    emit(event: string, payload: any) {
-        if (this.events[event]) {
-            // Execute handlers asynchronously to prevent blocking the caller
-            setTimeout(() => {
-                this.events[event].forEach(handler => {
-                    try {
-                        handler(payload);
-                    } catch (e) {
-                        console.error(`[EventBus] Error in handler for ${event}:`, e);
-                    }
-                });
-            }, 0);
-        }
+    async publish(
+        type: string,
+        aggregateType: string,
+        aggregateId: string,
+        payload: any,
+        tenantId: string,
+        trx?: DbTransaction
+    ): Promise<void> {
+        const event: OutboxEvent = {
+            id: generateUUIDv7(),
+            type,
+            aggregateId,
+            aggregateType,
+            payload,
+            occurredOn: new Date().toISOString(),
+            status: 'PENDING',
+            tenantId
+        };
+        
+        await DbEngine.insert('outbox_events', event as any, trx);
     }
 };
+

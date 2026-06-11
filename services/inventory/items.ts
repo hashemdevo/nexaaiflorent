@@ -1,6 +1,7 @@
 import { DbEngine } from '../core/db';
 import { InventoryItem } from '../../types';
 import { BaseEntity } from '../core/types';
+import { generateUUIDv7 } from '../../types/enterprise';
 
 interface EnterpriseInventoryItem extends InventoryItem, Omit<BaseEntity, 'id'> {}
 
@@ -9,7 +10,7 @@ export const InventoryService = {
         return DbEngine.select<EnterpriseInventoryItem>('inventory', { orderBy: 'name', orderDir: 'asc' });
     },
 
-    async adjustStock(itemId: string, delta: number, reason: string, actor: string) {
+    async adjustStock(itemId: string, delta: number, reason: string, actor: string, tenantId: string = 'tenant-nexa-001') {
         const trx = await DbEngine.startTransaction();
         try {
             const items = await DbEngine.select<EnterpriseInventoryItem>('inventory', { where: { id: itemId } });
@@ -20,13 +21,13 @@ export const InventoryService = {
             const newQuantity = item.quantity + delta;
             if (newQuantity < 0) throw new Error("Insufficient stock");
 
-            await DbEngine.update<EnterpriseInventoryItem>('inventory', itemId, { quantity: newQuantity }, trx);
+            await DbEngine.update<EnterpriseInventoryItem>('inventory', itemId, { quantity: newQuantity } as any, trx);
             
             // Log the stock movement (audit)
             // We access the Audit table directly via DbEngine insert for speed
             await DbEngine.insert('audit_logs', {
-                id: `stock-log-${Date.now()}`,
-                tenantId: 'default',
+                id: generateUUIDv7(),
+                tenantId,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1,
@@ -36,7 +37,7 @@ export const InventoryService = {
                 action: 'UPDATE',
                 target: item.name,
                 details: `Stock adjusted by ${delta}. Reason: ${reason}`
-            }, trx);
+            } as any, trx);
 
             await trx.commit();
         } catch (e) {

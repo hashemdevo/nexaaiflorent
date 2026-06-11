@@ -17,13 +17,16 @@ const DEFAULT_ACCOUNTS: EnterpriseAccount[] = [
 ];
 
 export const AccountService = {
+    _initialized: false,
     async init() {
+        if (this._initialized) return;
         const existing = await DbEngine.select<EnterpriseAccount>('accounts');
         if (existing.length === 0) {
             for (const acc of DEFAULT_ACCOUNTS) {
                 await DbEngine.insert('accounts', acc);
             }
         }
+        this._initialized = true;
     },
 
     async getAll(): Promise<Account[]> {

@@ -34,6 +34,10 @@ class LRUCache<K, V> {
         this.cache.set(key, value);
     }
 
+    delete(key: K): void {
+        this.cache.delete(key);
+    }
+
     clear() {
         this.cache.clear();
     }
@@ -67,7 +71,7 @@ export const CacheLayer = {
 
     invalidate(cacheName: 'settings' | 'rates' | 'userPermissions', key?: string) {
         if (key) {
-            this[cacheName].put(key, null); // Effectively remove
+            this[cacheName].delete(key);
         } else {
             this[cacheName].clear();
         }

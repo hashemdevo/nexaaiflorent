@@ -1,9 +1,11 @@
 
 import { DbEngine } from './db';
 import { AccountService } from '../ledger/accounts';
-import { JournalService } from '../ledger/journal';
-import { InventoryItem, JournalEntryLine } from '../../types';
+import { OutboxConsumer } from '../ledger/outboxConsumer';
+import { InventoryItem } from '../../types';
 import { Customer, Vendor, Invoice } from './types';
+import { EventBus } from './events';
+import { generateUUIDv7 } from '../../types/enterprise';
 
 // Sub-Seeders
 import { SeedCRM } from './seeds/crm';
@@ -63,8 +65,9 @@ export const DatabaseSeeder = {
                 // Create 3 invoices per month
                 for (let j = 0; j < 3; j++) {
                     const amount = 2000 + Math.floor(Math.random() * 3000);
+                    const newInvoiceId = generateUUIDv7();
                     const inv: Invoice = {
-                        id: `inv-seed-${i}-${j}`,
+                        id: newInvoiceId,
                         tenantId: 'default',
                         createdAt: date.toISOString(),
                         updatedAt: date.toISOString(),
@@ -80,24 +83,24 @@ export const DatabaseSeeder = {
                         balanceDue: 0,
                         items: []
                     };
-                    await DbEngine.insert('invoices', inv, trx);
+                    await DbEngine.insert('invoices', inv as any, trx);
 
-                    // Corresponding Journal Entry
-                    const glLines: JournalEntryLine[] = [
-                        { accountId: '1200', accountName: 'Accounts Receivable', debit: amount * 1.1, credit: 0 },
-                        { accountId: '4000', accountName: 'Sales Revenue', debit: 0, credit: amount },
-                        { accountId: '2000', accountName: 'Tax Payable', debit: 0, credit: amount * 0.1 }
-                    ];
-                    
-                    await JournalService.postEntry({
-                        transactionDate: dateStr,
-                        postedDate: date.toISOString(),
-                        reference: inv.invoiceNumber,
-                        description: `Seed Invoice ${inv.invoiceNumber}`,
-                        lines: glLines,
-                        totalAmount: amount * 1.1,
-                        createdBy: 'SYSTEM'
-                    }, trx);
+                    // Publish Outbox Event
+                    await EventBus.publish(
+                        'INVOICE_POSTED',
+                        'Invoice',
+                        newInvoiceId,
+                        {
+                            invoiceId: newInvoiceId,
+                            customerId: 'cus-2',
+                            subtotal: amount,
+                            taxTotal: amount * 0.1,
+                            totalAmount: amount * 1.1,
+                            date: dateStr
+                        },
+                        'default',
+                        trx
+                    );
                 }
             }
 
@@ -110,20 +113,19 @@ export const DatabaseSeeder = {
                 await DbEngine.insert('vendors', { ...vnd, tenantId: 'default', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), version: 1 } as any, trx);
             }
 
-            // 6. Initial Capital
-            const glLines: JournalEntryLine[] = [
-                { accountId: '1010', accountName: 'Cash', debit: 50000, credit: 0 },
-                { accountId: '3000', accountName: 'Owner Equity', debit: 0, credit: 50000 }
-            ];
-            await JournalService.postEntry({
-                transactionDate: new Date().toISOString(),
-                postedDate: new Date().toISOString(),
-                reference: 'OPENING-BAL',
-                description: 'Opening Balance / Initial Capital',
-                lines: glLines,
-                totalAmount: 50000,
-                createdBy: 'SYSTEM'
-            }, trx);
+            // 6. Initial Capital via Outbox
+            const openingBalEventId = generateUUIDv7();
+            await EventBus.publish(
+                'OPENING_BALANCE',
+                'Journal',
+                openingBalEventId,
+                {
+                    amount: 50000,
+                    date: new Date().toISOString()
+                },
+                'default',
+                trx
+            );
 
             // 7. Run Sub-Seeders for Enterprise Modules
             await SeedCRM.run(trx);
@@ -133,6 +135,9 @@ export const DatabaseSeeder = {
 
             await trx.commit();
             console.log("✅ Database Seeding Complete with History.");
+            
+            // 8. Process Outbox events generated during seeding
+            await OutboxConsumer.processPendingEvents();
 
         } catch (e) {
             await trx.rollback();

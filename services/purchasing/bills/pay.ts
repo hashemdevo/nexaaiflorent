@@ -2,8 +2,8 @@
 import { DbEngine } from '../../core/db';
 import { Bill, BillPayment, Vendor } from '../../core/types';
 import { PayBillDTO } from '../types';
-import { JournalService } from '../../ledger/journal';
-import { JournalEntryLine } from '../../../types';
+import { generateUUIDv7 } from '../../../types/enterprise';
+import { EventBus } from '../../core/events';
 
 export const BillPayService = {
     async pay(dto: PayBillDTO): Promise<BillPayment> {
@@ -19,40 +19,12 @@ export const BillPayService = {
                 throw new Error("Payment amount exceeds bill balance");
             }
 
-            // 2. Prepare GL Lines
-            const glLines: JournalEntryLine[] = [];
+            const paymentId = generateUUIDv7();
 
-            // Debit: Accounts Payable (Reducing Liability)
-            glLines.push({
-                accountId: '2000', // AP Account
-                accountName: 'Accounts Payable',
-                debit: dto.amount,
-                credit: 0
-            });
-
-            // Credit: Bank/Cash (Asset Decreasing)
-            glLines.push({
-                accountId: dto.paymentAccountId,
-                accountName: 'Bank/Cash',
-                debit: 0,
-                credit: dto.amount
-            });
-
-            // 3. Post Journal Entry
-            const journalEntry = await JournalService.postEntry({
-                transactionDate: new Date().toISOString().split('T')[0],
-                postedDate: new Date().toISOString(),
-                reference: `PAY-BILL-${bill.billNumber}`,
-                description: `Payment for Bill #${bill.billNumber}`,
-                lines: glLines,
-                totalAmount: dto.amount,
-                createdBy: 'SYSTEM'
-            }, trx);
-
-            // 4. Create Payment Record
+            // 2. Create Payment Record
             const payment: BillPayment = {
-                id: `bpay-${Date.now()}`,
-                tenantId: 'default',
+                id: paymentId,
+                tenantId: 'tenant-nexa-001',
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1,
@@ -61,27 +33,43 @@ export const BillPayService = {
                 amount: dto.amount,
                 date: new Date().toISOString().split('T')[0],
                 method: dto.method,
-                paymentAccountId: dto.paymentAccountId,
-                journalEntryId: journalEntry.id
+                paymentAccountId: dto.paymentAccountId
             };
 
-            await DbEngine.insert('bill_payments', payment, trx);
+            await DbEngine.insert('bill_payments', payment as any, trx);
 
-            // 5. Update Bill Status
+            // 3. Update Bill Status
             const newBalance = bill.balanceDue - dto.amount;
-            await DbEngine.update<Bill>('bills', bill.id, {
+            await DbEngine.update<Bill>('bills', bill.id!, {
                 balanceDue: newBalance,
                 status: newBalance <= 0 ? 'PAID' : 'OPEN'
-            }, trx);
+            } as any, trx);
 
-            // 6. Update Vendor Balance (We owe them less)
+            // 4. Update Vendor Balance (We owe them less)
             const vendors = await DbEngine.select<Vendor>('vendors', { where: { id: bill.vendorId } });
             if (vendors.length > 0) {
                 const vendor = vendors[0];
                 await DbEngine.update<Vendor>('vendors', bill.vendorId, {
                     balance: (vendor.balance || 0) - dto.amount
-                }, trx);
+                } as any, trx);
             }
+
+            // 5. Publish Outbox Event for Accounting Domain
+            await EventBus.publish(
+                'BILL_PAID',
+                'BillPayment',
+                paymentId,
+                {
+                    paymentId,
+                    billId: dto.billId,
+                    vendorId: bill.vendorId,
+                    amount: dto.amount,
+                    method: dto.method,
+                    paymentAccountId: dto.paymentAccountId
+                },
+                'tenant-nexa-001',
+                trx
+            );
 
             await trx.commit();
             return payment;

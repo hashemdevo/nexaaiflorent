@@ -4,6 +4,7 @@ import { BaseEntity, DbTransaction } from '../core/types';
 import { AccountService } from './accounts';
 import { SecurityService } from '../securityService';
 import { AnomalyTriggerService } from '../budgeting/anomalyTrigger';
+import { generateUUIDv7 } from '../../types/enterprise';
 
 interface EnterpriseJournalEntry extends JournalEntry, Omit<BaseEntity, 'id'> {}
 
@@ -29,14 +30,16 @@ export const JournalService = {
                 throw new Error(`Unbalanced Transaction: Debit ${totalDebit} != Credit ${totalCredit}`);
             }
 
+            const newId = generateUUIDv7();
+
             // 3. Prepare Record
             const newEntry: EnterpriseJournalEntry = {
                 ...entry,
-                id: `JRN-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-                tenantId: 'default', 
+                id: newId,
+                tenantId: 'tenant-nexa-001', 
                 status: 'POSTED',
                 totalAmount: totalDebit,
-                hash: await SecurityService.sha256(JSON.stringify(entry) + Date.now()),
+                hash: await SecurityService.sha256(JSON.stringify(entry) + newId),
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1

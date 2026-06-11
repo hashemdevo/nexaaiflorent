@@ -18,18 +18,23 @@ export const SecurityService = {
   generateRandomSecret() {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
     let secret = '';
+    const randomArray = new Uint8Array(16);
+    crypto.getRandomValues(randomArray);
     for (let i = 0; i < 16; i++) {
-      secret += chars.charAt(Math.floor(Math.random() * chars.length));
+        secret += chars.charAt(randomArray[i] % chars.length);
     }
     return secret;
   },
 
   // 3. Generate Backup Codes
   generateBackupCodes() {
-    return Array.from({ length: 6 }, () => 
-      Math.random().toString(36).substr(2, 4).toUpperCase() + '-' + 
-      Math.random().toString(36).substr(2, 4).toUpperCase()
-    );
+    return Array.from({ length: 6 }, () => {
+        const randomArray = new Uint8Array(2);
+        crypto.getRandomValues(randomArray);
+        const codePart1 = randomArray[0].toString(36).padStart(2, '0').toUpperCase().substring(0, 4);
+        const codePart2 = randomArray[1].toString(36).padStart(2, '0').toUpperCase().substring(0, 4);
+        return codePart1 + '-' + codePart2; 
+    });
   },
 
   // 4. TOTP Generation (RFC 6238)

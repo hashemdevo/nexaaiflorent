@@ -2,8 +2,8 @@ import { DbEngine } from '../core/db';
 import { PayRun, Payslip, BaseEntity } from '../core/types';
 import { CreatePayRunDTO } from './types';
 import { PayrollEngine } from './engine';
-import { JournalService } from '../ledger/journal';
-import { JournalEntryLine } from '../../types';
+import { generateUUIDv7 } from '../../types/enterprise';
+import { EventBus } from '../core/events';
 import { ClientEmployee } from '../../types';
 
 interface EnterpriseEmployee extends ClientEmployee, Omit<BaseEntity, 'id'> {
@@ -12,11 +12,11 @@ interface EnterpriseEmployee extends ClientEmployee, Omit<BaseEntity, 'id'> {
 
 export const PayRunService = {
     
-    async createDraftRun(dto: CreatePayRunDTO): Promise<PayRun> {
+    async createDraftRun(dto: CreatePayRunDTO, tenantId: string = 'tenant-nexa-001'): Promise<PayRun> {
         const trx = await DbEngine.startTransaction();
         
         try {
-            const payRunId = `prun-${Date.now()}`;
+            const payRunId = generateUUIDv7();
             let totalGross = 0;
             let totalTax = 0;
             let totalNet = 0;
@@ -62,8 +62,8 @@ export const PayRunService = {
                 const calc = PayrollEngine.calculateNetPay(baseSalary, components);
 
                 const payslip: Payslip = {
-                    id: `pslip-${Date.now()}-${empId}`,
-                    tenantId: 'default',
+                    id: generateUUIDv7(),
+                    tenantId,
                     createdAt: new Date().toISOString(),
                     updatedAt: new Date().toISOString(),
                     version: 1,
@@ -77,7 +77,7 @@ export const PayRunService = {
                     status: 'DRAFT'
                 };
 
-                await DbEngine.insert('payslips', payslip, trx);
+                await DbEngine.insert('payslips', payslip as any, trx);
 
                 totalGross += calc.gross;
                 totalTax += calc.tax;
@@ -87,7 +87,7 @@ export const PayRunService = {
             // 2. Create Pay Run Header
             const payRun: PayRun = {
                 id: payRunId,
-                tenantId: 'default',
+                tenantId,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1,
@@ -100,7 +100,7 @@ export const PayRunService = {
                 status: 'DRAFT'
             };
 
-            await DbEngine.insert('pay_runs', payRun, trx);
+            await DbEngine.insert('pay_runs', payRun as any, trx);
             await trx.commit();
             
             return payRun;
@@ -111,7 +111,7 @@ export const PayRunService = {
         }
     },
 
-    async approveAndPost(payRunId: string): Promise<void> {
+    async approveAndPost(payRunId: string, tenantId: string = 'tenant-nexa-001'): Promise<void> {
         const trx = await DbEngine.startTransaction();
         try {
             // 1. Get Pay Run
@@ -119,55 +119,36 @@ export const PayRunService = {
             const run = runs[0];
             if (!run) throw new Error("Pay Run not found");
 
-            // 2. Create Journal Entry
-            // Debit: Salaries Expense
-            // Credit: Tax Payable
-            // Credit: Bank (Net Pay)
-            
-            const glLines: JournalEntryLine[] = [
-                {
-                    accountId: '5001', // Salaries Expense
-                    accountName: 'Salaries Expense',
-                    debit: run.totalGross,
-                    credit: 0
-                },
-                {
-                    accountId: '2020', // Tax Payable (Liability) - Mock ID
-                    accountName: 'Payroll Tax Payable',
-                    debit: 0,
-                    credit: run.totalTax
-                },
-                {
-                    accountId: '1010', // Cash/Bank
-                    accountName: 'Cash',
-                    debit: 0,
-                    credit: run.totalNet
-                }
-            ];
-
-            const journalEntry = await JournalService.postEntry({
-                transactionDate: run.paymentDate,
-                postedDate: new Date().toISOString(),
-                reference: `PAYROLL-${run.id}`,
-                description: `Payroll Run ${run.periodStart} to ${run.periodEnd}`,
-                lines: glLines,
-                totalAmount: run.totalGross,
-                createdBy: 'SYSTEM'
-            }, trx);
-
-            // 3. Update Pay Run Status
+            // 2. Update Pay Run Status
             await DbEngine.update<PayRun>('pay_runs', payRunId, {
-                status: 'PAID',
-                journalEntryId: journalEntry.id
-            }, trx);
+                status: 'PAID'
+            } as any, trx);
 
-            // 4. Update Payslips status
+            // 3. Update Payslips status
             const payslips = await DbEngine.select<Payslip>('payslips', { where: { payRunId } });
             for(const slip of payslips) {
                 if(slip.id) {
-                    await DbEngine.update<Payslip>('payslips', slip.id, { status: 'ISSUED' }, trx);
+                    await DbEngine.update<Payslip>('payslips', slip.id, { status: 'ISSUED' } as any, trx);
                 }
             }
+            
+            // 4. Publish Outbox Event for Accounting Domain
+            await EventBus.publish(
+                'PAYRUN_POSTED',
+                'PayRun',
+                payRunId,
+                {
+                    payRunId,
+                    paymentDate: run.paymentDate,
+                    periodStart: run.periodStart,
+                    periodEnd: run.periodEnd,
+                    totalGross: run.totalGross,
+                    totalTax: run.totalTax,
+                    totalNet: run.totalNet
+                },
+                tenantId,
+                trx
+            );
 
             await trx.commit();
         } catch(e) {

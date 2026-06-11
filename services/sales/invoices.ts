@@ -1,8 +1,7 @@
 
 import { DbEngine } from '../core/db';
 import { Invoice, InvoiceItem, Customer } from '../core/types';
-import { JournalService } from '../ledger/journal';
-import { JournalEntryLine } from '../../types';
+import { generateUUIDv7 } from '../../types/enterprise';
 import { EventBus } from '../core/events';
 
 export const InvoiceService = {
@@ -14,7 +13,8 @@ export const InvoiceService = {
         customerId: string, 
         items: InvoiceItem[], 
         date: string, 
-        dueDate: string
+        dueDate: string,
+        tenantId: string = 'tenant-nexa-001'
     ): Promise<Invoice> {
         const trx = await DbEngine.startTransaction();
 
@@ -29,11 +29,12 @@ export const InvoiceService = {
             });
             
             const totalAmount = subtotal + taxTotal;
+            const newInvoiceId = generateUUIDv7();
 
             // 2. Create Invoice Record
             const invoice: Invoice = {
-                id: `inv-${Date.now()}`,
-                tenantId: 'default',
+                id: newInvoiceId,
+                tenantId: tenantId,
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1,
@@ -41,7 +42,7 @@ export const InvoiceService = {
                 customerId,
                 date,
                 dueDate,
-                status: 'POSTED', // Auto-post for this workflow
+                status: 'POSTED', 
                 subtotal,
                 taxTotal,
                 totalAmount,
@@ -49,64 +50,34 @@ export const InvoiceService = {
                 items
             };
 
-            // 3. Prepare GL Lines
-            const glLines: JournalEntryLine[] = [];
+            // 3. Save Invoice
+            await DbEngine.insert('invoices', invoice as any, trx);
 
-            // Debit: Accounts Receivable (Asset)
-            glLines.push({
-                accountId: '1200', // AR Account ID from seeds
-                accountName: 'Accounts Receivable',
-                debit: totalAmount,
-                credit: 0
-            });
-
-            // Credit: Revenue (Income)
-            if (subtotal > 0) {
-                glLines.push({
-                    accountId: '4000', // Revenue Account ID from seeds
-                    accountName: 'Sales Revenue',
-                    debit: 0,
-                    credit: subtotal
-                });
-            }
-
-            // Credit: Tax Payable (Liability)
-            if (taxTotal > 0) {
-                glLines.push({
-                    accountId: '2000', // Using AP/Liability for Tax momentarily as placeholder
-                    accountName: 'Tax Payable',
-                    debit: 0,
-                    credit: taxTotal
-                });
-            }
-
-            // 4. Create Journal Entry (Linked to Invoice)
-            const journalEntry = await JournalService.postEntry({
-                transactionDate: date,
-                postedDate: new Date().toISOString(),
-                reference: invoice.invoiceNumber,
-                description: `Invoice generated for Customer #${customerId}`,
-                lines: glLines,
-                totalAmount: totalAmount,
-                createdBy: 'SYSTEM'
-            }, trx);
-
-            invoice.journalEntryId = journalEntry.id;
-
-            // 5. Save Invoice
-            await DbEngine.insert('invoices', invoice, trx);
-
-            // 6. Update Customer Balance (AR Impact)
+            // 4. Update Customer Balance 
             const customerRows = await DbEngine.select<any>('customers', { where: { id: customerId } });
             if (customerRows.length > 0) {
                 const customer = customerRows[0];
-                await DbEngine.update<Customer>('customers', customerId, { balance: (customer.balance || 0) + totalAmount }, trx);
+                await DbEngine.update<Customer>('customers', customerId, { balance: (customer.balance || 0) + totalAmount } as any, trx);
             }
 
-            await trx.commit();
+            // 5. Publish Outbox Event for Accounting Domain
+            await EventBus.publish(
+                'INVOICE_POSTED',
+                'Invoice',
+                invoice.id!,
+                {
+                    invoiceId: invoice.id,
+                    customerId,
+                    subtotal,
+                    taxTotal,
+                    totalAmount,
+                    date
+                },
+                tenantId,
+                trx
+            );
 
-            // 7. Emit Event (Post-Commit)
-            EventBus.emit('INVOICE_CREATED', { invoiceId: invoice.id, customerId, totalAmount });
+            await trx.commit();
 
             return invoice;
 

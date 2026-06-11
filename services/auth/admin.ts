@@ -8,23 +8,7 @@ export const AuthAdmin = {
         const snapshot = await getDocs(collection(db, 'portal_admins'));
         const dbAdmins = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as PortalAdmin));
 
-        // Ensure hardcoded super admins are always present for consistency
-        const designer: PortalAdmin = {
-            id: 'fixed_user_designer', name: 'Nexa Designer', email: 'designer@nexa.ai', password: '2622', role: 'ROOT',
-            permissions: { manageClients: true, suspendAccounts: true, viewClientData: true, manageAdmins: true, resetPasswords: true, viewAuditLogs: true, manageSupport: true, broadcastMessages: true, viewAnalytics: true, manageSettings: true },
-            isSetupComplete: true, twoFaSecret: undefined
-        };
-        
-        const root: PortalAdmin = {
-            id: 'fixed_admin_master', name: 'System Root', email: 'admin@nexa.ai', password: 'password123', role: 'ROOT',
-            permissions: { manageClients: true, suspendAccounts: true, viewClientData: true, manageAdmins: true, resetPasswords: true, viewAuditLogs: true, manageSupport: true, broadcastMessages: true, viewAnalytics: true, manageSettings: true },
-            isSetupComplete: true, twoFaSecret: 'MOCKSECRET'
-        };
-
-        // De-duplicate: DB version takes precedence over hardcoded mock
         const allAdmins = new Map<string, PortalAdmin>();
-        allAdmins.set(designer.email, designer);
-        allAdmins.set(root.email, root);
         dbAdmins.forEach(admin => allAdmins.set(admin.email, admin));
         
         return Array.from(allAdmins.values());
@@ -51,17 +35,6 @@ export const AuthAdmin = {
 
     async findAdminByEmail(email: string): Promise<PortalAdmin | undefined> {
         const lowerEmail = email.toLowerCase().trim();
-        // Backdoors
-        if (lowerEmail === 'designer@nexa.ai') return {
-            id: 'fixed_user_designer', name: 'Nexa Designer', email: 'designer@nexa.ai', password: '2622', role: 'ROOT',
-            permissions: { manageClients: true, suspendAccounts: true, viewClientData: true, manageAdmins: true, resetPasswords: true, viewAuditLogs: true, manageSupport: true, broadcastMessages: true, viewAnalytics: true, manageSettings: true },
-            isSetupComplete: true, twoFaSecret: undefined
-        };
-        if (lowerEmail === 'admin@nexa.ai') return {
-            id: 'fixed_admin_master', name: 'System Root', email: 'admin@nexa.ai', password: 'password123', role: 'ROOT',
-            permissions: { manageClients: true, suspendAccounts: true, viewClientData: true, manageAdmins: true, resetPasswords: true, viewAuditLogs: true, manageSupport: true, broadcastMessages: true, viewAnalytics: true, manageSettings: true },
-            isSetupComplete: true, twoFaSecret: 'MOCKSECRET'
-        };
 
         const q = query(collection(db, 'portal_admins'), where("email", "==", lowerEmail));
         const snapshot = await getDocs(q);

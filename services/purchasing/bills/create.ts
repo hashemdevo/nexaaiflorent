@@ -2,8 +2,8 @@
 import { DbEngine } from '../../core/db';
 import { Bill, Vendor } from '../../core/types';
 import { CreateBillDTO } from '../types';
-import { JournalService } from '../../ledger/journal';
-import { JournalEntryLine } from '../../../types';
+import { generateUUIDv7 } from '../../../types/enterprise';
+import { EventBus } from '../../core/events';
 
 export const BillCreateService = {
     async create(dto: CreateBillDTO): Promise<Bill> {
@@ -13,42 +13,12 @@ export const BillCreateService = {
             // 1. Calculate Total
             const totalAmount = dto.items.reduce((sum, item) => sum + item.amount, 0);
 
-            // 2. Prepare GL Lines
-            const glLines: JournalEntryLine[] = [];
+            const billId = generateUUIDv7();
 
-            // Debits: Expense or Asset Accounts (What we bought)
-            dto.items.forEach(item => {
-                glLines.push({
-                    accountId: item.expenseAccountId,
-                    accountName: 'Expense/Asset', // Ideally fetched from AccountService
-                    debit: item.amount,
-                    credit: 0
-                });
-            });
-
-            // Credit: Accounts Payable (Liability - We owe money)
-            glLines.push({
-                accountId: '2000', // Standard AP Account
-                accountName: 'Accounts Payable',
-                debit: 0,
-                credit: totalAmount
-            });
-
-            // 3. Post Journal Entry
-            const journalEntry = await JournalService.postEntry({
-                transactionDate: dto.date,
-                postedDate: new Date().toISOString(),
-                reference: `BILL-${dto.billNumber}`,
-                description: `Bill from Vendor #${dto.vendorId}`,
-                lines: glLines,
-                totalAmount: totalAmount,
-                createdBy: 'SYSTEM'
-            }, trx);
-
-            // 4. Create Bill Record
+            // 2. Create Bill Record
             const bill: Bill = {
-                id: `bill-${Date.now()}`,
-                tenantId: 'default',
+                id: billId,
+                tenantId: 'tenant-nexa-001',
                 createdAt: new Date().toISOString(),
                 updatedAt: new Date().toISOString(),
                 version: 1,
@@ -59,20 +29,36 @@ export const BillCreateService = {
                 status: 'OPEN',
                 totalAmount,
                 balanceDue: totalAmount,
-                items: dto.items,
-                journalEntryId: journalEntry.id
+                items: dto.items
             };
 
-            await DbEngine.insert('bills', bill, trx);
+            await DbEngine.insert('bills', bill as any, trx);
 
-            // 5. Update Vendor Balance (We owe them more)
+            // 3. Update Vendor Balance
             const vendors = await DbEngine.select<Vendor>('vendors', { where: { id: dto.vendorId } });
             if (vendors.length > 0) {
                 const vendor = vendors[0];
                 await DbEngine.update<Vendor>('vendors', dto.vendorId, { 
                     balance: (vendor.balance || 0) + totalAmount 
-                }, trx);
+                } as any, trx);
             }
+
+            // 4. Publish Outbox Event for Accounting Domain
+            await EventBus.publish(
+                'BILL_CREATED',
+                'Bill',
+                billId,
+                {
+                    billId,
+                    vendorId: dto.vendorId,
+                    totalAmount,
+                    date: dto.date,
+                    billNumber: dto.billNumber,
+                    items: dto.items
+                },
+                'tenant-nexa-001',
+                trx
+            );
 
             await trx.commit();
             return bill;
