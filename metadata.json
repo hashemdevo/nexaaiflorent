@@ -1,0 +1,9 @@
+{
+  "name": "nexaledger AI",
+  "description": "Next-generation AI-powered accounting, financial management, and smart retail terminal featuring automated insights, recipe-based stock decoupling, and secure biometric geofenced attendance matching.",
+  "requestFramePermissions": [
+    "microphone",
+    "geolocation",
+    "camera"
+  ]
+}
