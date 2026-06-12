@@ -78,7 +78,7 @@ export const SecurityService = {
 
   getAuditLogs(): AuditLogEntry[] {
     try {
-        const saved = localStorage.getItem('nexa_db_audit_logs');
+        const saved = null;
         // Securely parse with sanitizer
         return cleanAndParseJSON(saved, []);
     } catch {

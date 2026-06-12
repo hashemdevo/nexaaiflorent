@@ -38,7 +38,7 @@ export const AttendanceService = {
         lat: number, 
         lng: number, 
         method: 'BIOMETRIC' | 'APP' = 'APP',
-        tenantId: string = 'tenant-nexa-001'
+        tenantId: string
     ): Promise<AttendanceRecord> {
         // 1. AuthZ - Verify if the transaction is authorized before DB Operations
         // In a real framework, we'd call AuthService.authorize(employeeId, 'attendance:clock-in').
@@ -111,7 +111,7 @@ export const AttendanceService = {
 
     async clockOut(
         employeeId: string, 
-        tenantId: string = 'tenant-nexa-001'
+        tenantId: string
     ): Promise<AttendanceRecord> {
         const recordId = generateUUIDv7();
         

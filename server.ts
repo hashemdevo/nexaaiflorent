@@ -72,7 +72,7 @@ async function startServer() {
 
   // Context hydrator middleware capturing correlation and trace tokens
   app.use((req, res, next) => {
-    const traceId = req.headers['x-trace-id'] || `trace-${crypto.randomUUID()}`;
+    const traceId = req.headers['x-trace-id'] || `trace-${generateUUIDv7()}`;
     const tenantId = req.headers['x-tenant-id'] || 'tenant-nexa-001';
     
     // Attach tracking properties directly to custom response headers for auditability
@@ -86,46 +86,16 @@ async function startServer() {
     res.json({ status: "ok", systemTime: new Date().toISOString() });
   });
 
-  // --- Local Database Simulator Helpers (For offline/sandboxed execution without Postgres URL) ---
-  const MOCK_DB_FILE = path.join(process.cwd(), "local_postgres_mimic_store.json");
-
-  function readMockDb() {
-    if (fs.existsSync(MOCK_DB_FILE)) {
-      try {
-        return JSON.parse(fs.readFileSync(MOCK_DB_FILE, "utf-8"));
-      } catch (e) {
-        console.error("Failed to parse mock DB, returning empty object", e);
-      }
-    }
-    return {};
-  }
-
-  function writeMockDb(data: any) {
-    try {
-      fs.writeFileSync(MOCK_DB_FILE, JSON.stringify(data, null, 2), "utf-8");
-    } catch (e) {
-      console.error("Failed to write mock DB", e);
-    }
-  }
-
-  function toSnakeCase(obj: any): any {
-    if (!obj || typeof obj !== 'object') return obj;
-    if (Array.isArray(obj)) return obj.map(toSnakeCase);
-    const result: any = {};
-    for (const key of Object.keys(obj)) {
-      const snakeKey = key.replace(/[A-Z]/g, l => `_${l.toLowerCase()}`);
-      result[snakeKey] = toSnakeCase(obj[key]);
-    }
-    return result;
-  }
-
   // Secure Enterprise Database Operation Engine (Replaces raw SQL endpoint)
   app.post("/api/db/crud", async (req, res) => {
     const traceId = res.getHeader('X-Trace-ID');
     const { operation, table, payload, id, options } = req.body;
     
     // Authorization Context (Simplistic role mapping from headers for architectural review)
-    let userRole = req.headers['x-user-role'] as string || "ACCOUNTANT";
+    let userRole = req.headers['x-user-role'] as string;
+    if (!userRole) {
+        return res.status(401).json({ status: "ERROR", error: "Missing x-user-role." });
+    }
     let userEmployeeId = req.headers['x-employee-id'] as string || "emp-sc-001";
     
     // Strict Input Validation (Prevent SQL Injection on identifiers)
@@ -160,206 +130,17 @@ async function startServer() {
       let result: { rows: any[], rowCount: number } = { rows: [], rowCount: 0 };
 
       if (!process.env.DATABASE_URL) {
-        // ========================================================
-        // LOCAL PERSISTENT FILE-BASED DATABASE FALLBACK (OFFLINE)
-        // ========================================================
-        let dbData = readMockDb();
-
-        if (operation === "SELECT") {
-          let rows = dbData[normalizedTable] || [];
-          
-          // Filter out deleted items unless specified
-          let filtered = rows.filter((r: any) => r.is_deleted === false || r.is_deleted === undefined);
-          
-          // Apply RLS security policies
-          if (userRole === "PURCHASING_SPECIALIST" && normalizedTable === "purchase_orders") {
-             filtered = filtered.filter((r: any) => r.created_by === userEmployeeId || r.purchases_representative_id === userEmployeeId);
-          }
-          if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory_items" || normalizedTable === "inventory")) {
-             filtered = filtered.filter((r: any) => r.warehouse_id === "warehouse_raw");
-          }
-          if (userRole === "SALES_REP" && normalizedTable === "sales_contracts") {
-             filtered = filtered.filter((r: any) => r.seller_id === userEmployeeId);
-          }
-          if (userRole === "SALES_REP" && (normalizedTable === "inventory_items" || normalizedTable === "inventory")) {
-             filtered = filtered.filter((r: any) => r.warehouse_id === "warehouse_sales");
-          }
-
-          // Apply manual options.where filtering
-          if (options?.where) {
-            filtered = filtered.filter((row: any) => {
-              for (const [k, v] of Object.entries(options.where)) {
-                const snakeKey = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-                if (row[snakeKey] !== v) return false;
-              }
-              return true;
-            });
-          }
-
-          // Apply sorting
-          if (options?.orderBy) {
-            const snakeOrder = options.orderBy.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-            const dir = options.orderDir === "desc" ? -1 : 1;
-            filtered.sort((a: any, b: any) => {
-              const valA = a[snakeOrder];
-              const valB = b[snakeOrder];
-              if (valA === undefined) return 1;
-              if (valB === undefined) return -1;
-              if (valA < valB) return -1 * dir;
-              if (valA > valB) return 1 * dir;
-              return 0;
-            });
-          }
-
-          // Apply limit
-          if (options?.limit && typeof options.limit === "number") {
-            filtered = filtered.slice(0, options.limit);
-          }
-
-          result = { rows: filtered, rowCount: filtered.length };
-        } 
-        
-        else if (operation === "INSERT") {
-          if (!dbData[normalizedTable]) {
-            dbData[normalizedTable] = [];
-          }
-          
-          if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-             payload.warehouseId = "warehouse_raw";
-          }
-          if (userRole === "SALES_REP" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-             payload.warehouseId = "warehouse_sales";
-          }
-
-          const newRow = {
-            id: payload.id || crypto.randomUUID(),
-            ...toSnakeCase(payload),
-            is_deleted: false,
-            created_at: payload.createdAt || new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          };
-
-          dbData[normalizedTable].push(newRow);
-
-          // Write audit log trail
-          if (normalizedTable !== 'audit_logs') {
-            if (!dbData['audit_logs']) dbData['audit_logs'] = [];
-            dbData['audit_logs'].push({
-              id: crypto.randomUUID(),
-              table_name: normalizedTable,
-              record_id: newRow.id,
-              action: 'INSERT',
-              actor_user_id: userEmployeeId,
-              timestamp: new Date().toISOString()
-            });
-          }
-
-          writeMockDb(dbData);
-          result = { rows: [newRow], rowCount: 1 };
-        } 
-        
-        else if (operation === "UPDATE") {
-          if (!id) throw new Error("ID required for UPDATE");
-          const rows = dbData[normalizedTable] || [];
-          const index = rows.findIndex((r: any) => r.id === id);
-          let updatedRow = null;
-
-          if (index !== -1) {
-            if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-               payload.warehouseId = "warehouse_raw";
-            }
-            if (userRole === "SALES_REP" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-               payload.warehouseId = "warehouse_sales";
-            }
-
-            updatedRow = {
-              ...rows[index],
-              ...toSnakeCase(payload),
-              updated_at: new Date().toISOString()
-            };
-            rows[index] = updatedRow;
-
-            // Write audit log trail
-            if (normalizedTable !== 'audit_logs') {
-              if (!dbData['audit_logs']) dbData['audit_logs'] = [];
-              dbData['audit_logs'].push({
-                id: crypto.randomUUID(),
-                table_name: normalizedTable,
-                record_id: id,
-                action: 'UPDATE',
-                actor_user_id: userEmployeeId,
-                timestamp: new Date().toISOString()
-              });
-            }
-
-            writeMockDb(dbData);
-          }
-
-          result = { rows: updatedRow ? [updatedRow] : [], rowCount: updatedRow ? 1 : 0 };
-        } 
-        
-        else if (operation === "TRANSACTION") {
-           const operations = payload?.operations || [];
-           const updatedRows: any[] = [];
-
-           for (const op of operations) {
-               const opTable = op.table?.toLowerCase();
-               enforceRBAC(op.operation); // check per op
-               
-               if (op.operation === "INSERT") {
-                  if (!dbData[opTable]) dbData[opTable] = [];
-                  const newRow = {
-                    id: op.payload.id || crypto.randomUUID(),
-                    ...toSnakeCase(op.payload),
-                    is_deleted: false,
-                    created_at: op.payload.createdAt || new Date().toISOString(),
-                    updated_at: new Date().toISOString()
-                  };
-                  dbData[opTable].push(newRow);
-                  updatedRows.push(newRow);
-               } else if (op.operation === "UPDATE") {
-                  const rows = dbData[opTable] || [];
-                  const index = rows.findIndex((r: any) => r.id === op.id);
-                  if (index !== -1) {
-                     const updatedRow = {
-                       ...rows[index],
-                       ...toSnakeCase(op.payload),
-                       updated_at: new Date().toISOString()
-                     };
-                     rows[index] = updatedRow;
-                     updatedRows.push(updatedRow);
-                  }
-               }
-           }
-
-           writeMockDb(dbData);
-           result = { rows: [], rowCount: operations.length };
-        } 
-        
-        else {
-          throw new Error("Unsupported database operation");
-        }
-
-        const durationMs = Date.now() - start;
-        logger.info(`[LocalPostgresMimic] ${operation} execution`, { traceId, table: normalizedTable, durationMs });
-
-        res.status(200).json({
-          status: "SUCCESS",
-          rows: result.rows || [],
-          rowCount: result.rowCount || 0,
-          executionTimeMs: durationMs
-        });
-      } 
+        throw new Error("DATABASE_URL is required but not set.");
+      }
       
-      else {
-        // ==========================================
-        // REAL POSTGRESQL DATABASE ENGINE
-        // ==========================================
+      // ==========================================
+      // REAL POSTGRESQL DATABASE ENGINE
+      // ==========================================
         let dbResult;
 
         // ---- READ (SELECT) ----
         if (operation === "SELECT") {
-          let sql = `SELECT * FROM ${normalizedTable}`;
+          let sql = `SELECT * FROM "${normalizedTable}"`;
           let values: any[] = [];
           let conditions = ["is_deleted = false"];
           
@@ -423,13 +204,13 @@ async function startServer() {
           const idx = keys.map((_, i) => '$' + (i+1));
           const values = keys.map(k => payload[k]);
 
-          const sql = `INSERT INTO ${normalizedTable} (${snakeKeys.join(', ')}) VALUES (${idx.join(', ')}) RETURNING *`;
+          const sql = `INSERT INTO "${normalizedTable}" (${snakeKeys.join(', ')}) VALUES (${idx.join(', ')}) RETURNING *`;
           dbResult = await pool.query(sql, values);
           
           if (table !== 'audit_logs' && dbResult.rows.length > 0) {
               await pool.query(
                   `INSERT INTO audit_logs (id, table_name, record_id, action, actor_user_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6)`,
-                  [crypto.randomUUID(), normalizedTable, dbResult.rows[0].id, 'INSERT', userEmployeeId, new Date().toISOString()]
+                  [generateUUIDv7(), normalizedTable, dbResult.rows[0].id, 'INSERT', userEmployeeId, new Date().toISOString()]
               );
           }
         }
@@ -451,7 +232,7 @@ async function startServer() {
           const values = keys.map(k => payload[k]);
           values.push(id);
 
-          let sql = `UPDATE ${normalizedTable} SET ${setClauses} WHERE id = $${values.length}`;
+          let sql = `UPDATE "${normalizedTable}" SET ${setClauses} WHERE id = $${values.length}`;
           
           if (userRole === "PURCHASING_SPECIALIST" && normalizedTable === "purchase_orders") {
              sql += ` AND (created_by = $${values.length + 1} OR purchases_representative_id = $${values.length + 1})`;
@@ -464,7 +245,7 @@ async function startServer() {
           if (table !== 'audit_logs') {
               await pool.query(
                   `INSERT INTO audit_logs (id, table_name, record_id, action, actor_user_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6)`,
-                  [crypto.randomUUID(), normalizedTable, id, 'UPDATE', userEmployeeId, new Date().toISOString()]
+                  [generateUUIDv7(), normalizedTable, id, 'UPDATE', userEmployeeId, new Date().toISOString()]
               );
           }
         }
@@ -519,7 +300,6 @@ async function startServer() {
           rowCount: dbResult.rowCount || 0,
           executionTimeMs: durationMs
         });
-      }
       
     } catch (err: any) {
       logger.error(`[Database Core] Execution Failure`, { traceId, error: err.message });

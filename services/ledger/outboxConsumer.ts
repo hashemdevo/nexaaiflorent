@@ -1,3 +1,4 @@
+import { AccountService } from './accounts';
 import { DbEngine } from '../core/db';
 import { JournalService } from './journal';
 import { OutboxEvent } from '../core/events';
@@ -53,9 +54,9 @@ export const OutboxConsumer = {
                     reference: `INV-${payload.invoiceId}`,
                     description: `Invoice generated for Customer #${payload.customerId}`,
                     lines: [
-                        { accountId: '1200', accountName: 'Accounts Receivable', debit: payload.totalAmount, credit: 0 },
-                        { accountId: '4000', accountName: 'Sales Revenue', debit: 0, credit: payload.subtotal },
-                        { accountId: '2000', accountName: 'Tax Payable', debit: 0, credit: payload.taxTotal }
+                        { accountId: (await AccountService.getByCode('1200'))?.id || '1200', accountName: 'Accounts Receivable', debit: payload.totalAmount, credit: 0 },
+                        { accountId: (await AccountService.getByCode('4000'))?.id || '4000', accountName: 'Sales Revenue', debit: 0, credit: payload.subtotal },
+                        { accountId: (await AccountService.getByCode('2000'))?.id || '2000', accountName: 'Tax Payable', debit: 0, credit: payload.taxTotal }
                     ],
                     totalAmount: payload.totalAmount,
                     createdBy: 'SYSTEM'
@@ -69,8 +70,8 @@ export const OutboxConsumer = {
                     reference: `PAY-${payload.invoiceId}`,
                     description: `Payment received for Invoice ${payload.invoiceId}`,
                     lines: [
-                        { accountId: payload.paymentAccountId || '1010', accountName: 'Cash/Bank', debit: payload.amount, credit: 0 },
-                        { accountId: '1200', accountName: 'Accounts Receivable', debit: 0, credit: payload.amount }
+                        { accountId: payload.paymentAccountId || (await AccountService.getByCode('1010'))?.id || '1010', accountName: 'Cash/Bank', debit: payload.amount, credit: 0 },
+                        { accountId: (await AccountService.getByCode('1200'))?.id || '1200', accountName: 'Accounts Receivable', debit: 0, credit: payload.amount }
                     ],
                     totalAmount: payload.amount,
                     createdBy: 'SYSTEM'
@@ -85,12 +86,12 @@ export const OutboxConsumer = {
                     description: `Bill from Vendor #${payload.vendorId}`,
                     lines: [
                         ...payload.items.map((item: any) => ({
-                            accountId: item.expenseAccountId || '5000',
+                            accountId: item.expenseAccountId || (await AccountService.getByCode('5000'))?.id || '5000',
                             accountName: 'Expense/Asset',
                             debit: item.amount,
                             credit: 0
                         })),
-                        { accountId: '2000', accountName: 'Accounts Payable', debit: 0, credit: payload.totalAmount }
+                        { accountId: (await AccountService.getByCode('2000'))?.id || '2000', accountName: 'Accounts Payable', debit: 0, credit: payload.totalAmount }
                     ],
                     totalAmount: payload.totalAmount,
                     createdBy: 'SYSTEM'
@@ -104,8 +105,8 @@ export const OutboxConsumer = {
                     reference: `PAY-BILL-${payload.billId}`,
                     description: `Payment for Bill #${payload.billId}`,
                     lines: [
-                        { accountId: '2000', accountName: 'Accounts Payable', debit: payload.amount, credit: 0 },
-                        { accountId: payload.paymentAccountId || '1010', accountName: 'Bank/Cash', debit: 0, credit: payload.amount }
+                        { accountId: (await AccountService.getByCode('2000'))?.id || '2000', accountName: 'Accounts Payable', debit: payload.amount, credit: 0 },
+                        { accountId: payload.paymentAccountId || (await AccountService.getByCode('1010'))?.id || '1010', accountName: 'Bank/Cash', debit: 0, credit: payload.amount }
                     ],
                     totalAmount: payload.amount,
                     createdBy: 'SYSTEM'
@@ -119,14 +120,18 @@ export const OutboxConsumer = {
                     reference: 'OPENING-BAL',
                     description: 'Opening Balance / Initial Capital',
                     lines: [
-                        { accountId: '1010', accountName: 'Cash', debit: payload.amount, credit: 0 },
-                        { accountId: '3000', accountName: 'Owner Equity', debit: 0, credit: payload.amount }
+                        { accountId: (await AccountService.getByCode('1010'))?.id || '1010', accountName: 'Cash', debit: payload.amount, credit: 0 },
+                        { accountId: (await AccountService.getByCode('3000'))?.id || '3000', accountName: 'Owner Equity', debit: 0, credit: payload.amount }
                     ],
                     totalAmount: payload.amount,
                     createdBy: 'SYSTEM'
                 }, trx);
                 break;
             }
+            case 'ATTENDANCE_CLOCKED_IN':
+            case 'ATTENDANCE_CLOCKED_OUT':
+                // HR Events (No direct journal entry needed, just mark PROCESSED)
+                break;
             default:
                 throw new Error(`Unhandled event type: ${type}`);
         }
