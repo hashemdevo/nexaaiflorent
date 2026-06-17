@@ -42,7 +42,9 @@ export const ChatStorageService = {
         const sessions = this.getSessions();
         sessions[session.id] = session;
         localStorage.setItem(STORAGE_KEY, JSON.stringify(sessions));
-        window.dispatchEvent(new Event('storage'));
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('storage'));
+        }
     },
 
     getVisitorId(): string {

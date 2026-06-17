@@ -46,6 +46,9 @@ export const StorageAdapter = {
     async getItem<T>(key: string, defaultValue: T): Promise<T> {
         return new Promise((resolve) => {
             try {
+                if (typeof localStorage === 'undefined') {
+                    return resolve(defaultValue);
+                }
                 const item = localStorage.getItem(key);
                 if (item === null) {
                     resolve(defaultValue);
@@ -63,11 +66,14 @@ export const StorageAdapter = {
     async setItem<T>(key: string, value: T): Promise<void> {
         return new Promise((resolve, reject) => {
             try {
+                if (typeof localStorage === 'undefined') return resolve();
                 const serialized = JSON.stringify(value);
                 const encrypted = encryptData(serialized);
                 localStorage.setItem(key, encrypted);
                 // Dispatch event for cross-tab/component sync
-                window.dispatchEvent(new CustomEvent('nexa-storage-update', { detail: { key, value } }));
+                if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('nexa-storage-update', { detail: { key, value } }));
+                }
                 resolve();
             } catch (e) {
                 console.error(`Storage Write Error [${key}]:`, e);
@@ -78,8 +84,12 @@ export const StorageAdapter = {
 
     async removeItem(key: string): Promise<void> {
         return new Promise((resolve) => {
-            localStorage.removeItem(key);
-            window.dispatchEvent(new CustomEvent('nexa-storage-update', { detail: { key, value: null } }));
+            if (typeof localStorage !== 'undefined') {
+                localStorage.removeItem(key);
+            }
+            if (typeof window !== 'undefined') {
+                window.dispatchEvent(new CustomEvent('nexa-storage-update', { detail: { key, value: null } }));
+            }
             resolve();
         });
     },
@@ -95,10 +105,12 @@ export const StorageAdapter = {
     async backupData(): Promise<string> {
         // Dumps all local storage to a JSON string (for export)
         const data: Record<string, any> = {};
-        for(let i=0; i<localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if(key && key.startsWith('nexa_')) {
-                data[key] = await this.getItem(key, null);
+        if (typeof localStorage !== 'undefined') {
+            for(let i=0; i<localStorage.length; i++) {
+                const key = localStorage.key(i);
+                if(key && key.startsWith('nexa_')) {
+                    data[key] = await this.getItem(key, null);
+                }
             }
         }
         return JSON.stringify(data);

@@ -14,7 +14,9 @@ export const KitchenOrderService = {
 
     saveOrders(orders: Order[]) {
         localStorage.setItem('nexa_pos_orders', JSON.stringify(orders));
-        window.dispatchEvent(new Event('nexa-kitchen-orders-updated'));
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new Event('nexa-kitchen-orders-updated'));
+        }
     },
 
     createOrder(order: Order) {

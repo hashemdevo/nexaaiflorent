@@ -8,7 +8,10 @@ import { cleanAndParseJSON } from '../geminiService';
  */
 export const MigrationRunner = {
     async run() {
-        const applied = localStorage.getItem('nexa_migrations_applied');
+        let applied = null;
+        if (typeof localStorage !== 'undefined') {
+            applied = localStorage.getItem('nexa_migrations_applied');
+        }
         const appliedVersions = cleanAndParseJSON(applied, []);
 
         const migrations = [
@@ -31,6 +34,8 @@ export const MigrationRunner = {
             }
         }
 
-        localStorage.setItem('nexa_migrations_applied', JSON.stringify(appliedVersions));
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('nexa_migrations_applied', JSON.stringify(appliedVersions));
+        }
     }
 };
