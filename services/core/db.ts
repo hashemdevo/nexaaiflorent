@@ -78,13 +78,15 @@ async function execCrud(operation: string, table: string, payload?: any, id?: st
             try {
                 let userRole = "ACCOUNTANT";
                 let userEmployeeId = "emp-sc-001";
+                let tenantId = "tenant-nexa-001";
                 
                 let baseUrl = "http://localhost:3000";
                 if (typeof window !== "undefined") {
                     baseUrl = "";
-                    if (window.localStorage) {
-                        userRole = window.localStorage.getItem("currentUserRole") || "ACCOUNTANT";
-                        userEmployeeId = window.localStorage.getItem("currentUserEmployeeId") || "emp-sc-001";
+                    if (typeof localStorage !== "undefined") {
+                        userRole = localStorage.getItem("currentUserRole") || "ACCOUNTANT";
+                        userEmployeeId = localStorage.getItem("currentUserEmployeeId") || "emp-sc-001";
+                        tenantId = localStorage.getItem("currentUserTenantId") || "tenant-nexa-001";
                     }
                 }
 
@@ -93,7 +95,8 @@ async function execCrud(operation: string, table: string, payload?: any, id?: st
                     headers: { 
                       "Content-Type": "application/json",
                       "X-User-Role": userRole,
-                      "X-Employee-ID": userEmployeeId
+                      "X-Employee-ID": userEmployeeId,
+                      "X-Tenant-ID": tenantId
                     },
                     body: JSON.stringify({ operation, table, payload, id, options })
                 });

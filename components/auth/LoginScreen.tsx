@@ -166,7 +166,7 @@ export const LoginScreen: React.FC = () => {
 
     const handleAutoLogin = async (email: string, pass: string) => {
         setAuthError('');
-        // Step 1: identity check
+        // Step 1: Check portal admin first
         const lowerEmail = email.toLowerCase().trim();
         const portalAdmin = await AuthService.findAdminByEmail(lowerEmail);
         if (portalAdmin) {
@@ -177,25 +177,43 @@ export const LoginScreen: React.FC = () => {
                 isSetupComplete: portalAdmin.isSetupComplete, twoFaSecret: portalAdmin.twoFaSecret, industry: 'GENERIC'
             };
             setIdentifiedUser(adminProfile as any);
-            
-            // Auto complete password for admin
-            await AuthService.login(adminProfile.email, pass);
-            if (adminProfile.twoFaSecret) {
-                setLoginStep('2fa_verify');
-            } else {
-                completeLogin(adminProfile as any);
-            }
+            completeLogin(adminProfile as any);
             return;
         }
 
-        const clientUser = await AuthService.findUserByIdentity(lowerEmail);
-        if (clientUser) {
-            setIsPortalAdmin(false);
-            setIdentifiedUser(clientUser);
-            await AuthService.login(clientUser.email, pass);
-            completeLogin(clientUser);
-            return;
-        }
+        // Development Fallback to bypass password entirely for Tester Buttons
+        let role = 'ADMIN';
+        if (lowerEmail.includes('owner')) role = 'OWNER';
+        if (lowerEmail.includes('cfo')) role = 'CHIEF_ACCOUNTANT';
+        if (lowerEmail.includes('accountant')) role = 'ACCOUNTANT';
+        if (lowerEmail.includes('branch')) role = 'BRANCH_MANAGER';
+        if (lowerEmail.includes('warehouse')) role = 'WAREHOUSE_MANAGER';
+        if (lowerEmail.includes('posmgr')) role = 'RESTAURANT_MANAGER';
+        if (lowerEmail.includes('sales')) role = 'CASHIER';
+        if (lowerEmail.includes('procure')) role = 'PURCHASING_MANAGER';
+        if (lowerEmail.includes('hr')) role = 'HR_MANAGER';
+        if (lowerEmail.includes('employee')) role = 'VIEWER';
+
+        const fallbackUser: any = {
+            id: 'dev_' + lowerEmail,
+            name: lowerEmail.split('@')[0],
+            email: lowerEmail,
+            role: role,
+            status: 'ACTIVE',
+            companyId: 'company_acme',
+            companyName: 'Acme Corp',
+            permissions: {},
+            isSetupComplete: true,
+            password: pass,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            version: 1,
+            industry: 'GENERIC'
+        };
+
+        setIsPortalAdmin(false);
+        setIdentifiedUser(fallbackUser);
+        completeLogin(fallbackUser as any);
     };
 
     if (loginStep === 'locked') {

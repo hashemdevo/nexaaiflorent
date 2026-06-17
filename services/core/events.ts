@@ -15,7 +15,17 @@ export interface OutboxEvent {
     tenantId: string;
 }
 
+type EventCallback = (payload: any) => void | Promise<void>;
+const listenersReg: Record<string, EventCallback[]> = {};
+
 export const EventBus = {
+    on(type: string, callback: EventCallback) {
+        if (!listenersReg[type]) {
+            listenersReg[type] = [];
+        }
+        listenersReg[type].push(callback);
+    },
+
     async publish(
         type: string,
         aggregateType: string,
@@ -36,6 +46,20 @@ export const EventBus = {
         };
         
         await DbEngine.insert('outbox_events', event as any, trx);
+
+        // Fire in-memory callbacks as well
+        if (listenersReg[type]) {
+            for (const cb of listenersReg[type]) {
+                try {
+                    const res = cb(payload);
+                    if (res instanceof Promise) {
+                        await res;
+                    }
+                } catch (e) {
+                    console.error(`[EventBus] Callback error for ${type}:`, e);
+                }
+            }
+        }
     }
 };
 

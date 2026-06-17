@@ -36,7 +36,8 @@ export const PaymentService = {
                 customerId: invoice.customerId,
                 amount,
                 date: new Date().toISOString().split('T')[0],
-                method
+                method,
+                depositAccountId: '1010'
             };
 
             // 3. Update Invoice Balance & Status

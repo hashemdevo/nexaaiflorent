@@ -9,7 +9,7 @@ export const OutboxConsumer = {
 
         try {
             // Select up to 50 PENDING events, lock them for processing
-            const events = await DbEngine.select<OutboxEvent>('outbox_events', {
+            const events = await DbEngine.select<any>('outbox_events', {
                 where: { status: 'PENDING' },
                 limit: 50,
                 orderBy: 'createdAt',
@@ -24,11 +24,11 @@ export const OutboxConsumer = {
             for (const event of events) {
                 try {
                     await this.processEvent(event, trx);
-                    await DbEngine.update<OutboxEvent>('outbox_events', event.id, {
+                    await DbEngine.update<any>('outbox_events', event.id, {
                         status: 'PROCESSED'
                     } as any, trx);
                 } catch (e: any) {
-                    await DbEngine.update<OutboxEvent>('outbox_events', event.id, {
+                    await DbEngine.update<any>('outbox_events', event.id, {
                         status: 'FAILED',
                         error: e.message
                     } as any, trx);
@@ -79,6 +79,11 @@ export const OutboxConsumer = {
                 break;
             }
             case 'BILL_CREATED': {
+                const expenseAccount = await AccountService.getByCode('5000');
+                const apAccount = await AccountService.getByCode('2000');
+                const expenseAccountId = expenseAccount?.id || '5000';
+                const apAccountId = apAccount?.id || '2000';
+
                 await JournalService.postEntry({
                     transactionDate: payload.date,
                     postedDate: new Date().toISOString(),
@@ -86,12 +91,12 @@ export const OutboxConsumer = {
                     description: `Bill from Vendor #${payload.vendorId}`,
                     lines: [
                         ...payload.items.map((item: any) => ({
-                            accountId: item.expenseAccountId || (await AccountService.getByCode('5000'))?.id || '5000',
+                            accountId: item.expenseAccountId || expenseAccountId,
                             accountName: 'Expense/Asset',
                             debit: item.amount,
                             credit: 0
                         })),
-                        { accountId: (await AccountService.getByCode('2000'))?.id || '2000', accountName: 'Accounts Payable', debit: 0, credit: payload.totalAmount }
+                        { accountId: apAccountId, accountName: 'Accounts Payable', debit: 0, credit: payload.totalAmount }
                     ],
                     totalAmount: payload.totalAmount,
                     createdBy: 'SYSTEM'

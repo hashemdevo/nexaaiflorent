@@ -5,9 +5,19 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import cors from "cors";
 import crypto from "crypto";
-import { Pool } from "pg";
+import { Pool, types } from "pg";
+import dotenv from "dotenv";
+
+dotenv.config();
+
 import { DataArchiver } from "./services/tools/archiver";
 import { ZatcaComplianceEngine } from "./services/tax/zatcaCompliance";
+import { generateUUIDv7 } from "./types/enterprise";
+
+// PostgreSQL numeric type parser to return Number instead of String
+types.setTypeParser(1700, function(val: string) {
+  return parseFloat(val);
+});
 
 // PostgreSQL Connection Pool
 const pool = new Pool({
@@ -41,6 +51,122 @@ const getGeminiClient = () => {
   return new GoogleGenAI({ apiKey: key });
 };
 
+// Dynamic Auto Schema Adapter & Safe Self-Healing Database Engine
+async function autoAdaptTable(client: any, tableName: string, payload?: any, queryWhere?: any, options?: any) {
+  const normalizedTable = tableName.trim().toLowerCase();
+  if (!/^[a-zA-Z0-9_]+$/.test(normalizedTable)) {
+    throw new Error(`Invalid table name: ${normalizedTable}`);
+  }
+
+  // 1. Ensure Table Exists
+  const checkTableSql = `
+    SELECT EXISTS (
+      SELECT FROM information_schema.tables 
+      WHERE table_schema = 'public' 
+      AND table_name = $1
+    );
+  `;
+  const tableCheck = await client.query(checkTableSql, [normalizedTable]);
+  const exists = tableCheck.rows[0]?.exists;
+
+  if (!exists) {
+    logger.info(`[Auto Schema Adapter] Creating missing table: ${normalizedTable}`);
+    const createTableSql = `
+      CREATE TABLE IF NOT EXISTS "${normalizedTable}" (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT DEFAULT 'default',
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW(),
+        version INT DEFAULT 1,
+        is_deleted BOOLEAN DEFAULT false,
+        deleted_at TIMESTAMPTZ
+      );
+    `;
+    await client.query(createTableSql);
+
+    // If normalizedTable is audit_logs, add default audit_logs columns of proper types right away
+    if (normalizedTable === 'audit_logs') {
+      await client.query(`ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS table_name TEXT`);
+      await client.query(`ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS record_id TEXT`);
+      await client.query(`ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS action TEXT`);
+      await client.query(`ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS actor_user_id TEXT`);
+      await client.query(`ALTER TABLE "audit_logs" ADD COLUMN IF NOT EXISTS timestamp TIMESTAMPTZ DEFAULT NOW()`);
+    }
+  }
+
+  // Helper to safely add column if missing
+  const ensureColumn = async (key: string, val: any) => {
+    if (!/^[a-zA-Z0-9_]+$/.test(key)) return;
+    const snakeKey = key.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+    
+    // Skip base columns
+    const baseCols = ['id', 'tenant_id', 'created_at', 'updated_at', 'version', 'is_deleted', 'deleted_at'];
+    if (baseCols.includes(snakeKey)) return;
+
+    const checkColSql = `
+      SELECT EXISTS (
+        SELECT FROM information_schema.columns 
+        WHERE table_schema = 'public' 
+        AND table_name = $1 
+        AND column_name = $2
+      );
+    `;
+    const colCheck = await client.query(checkColSql, [normalizedTable, snakeKey]);
+    const colExists = colCheck.rows[0]?.exists;
+
+    if (!colExists) {
+      let type = 'TEXT';
+      if (typeof val === 'boolean') {
+        type = 'BOOLEAN';
+      } else if (typeof val === 'number') {
+        if (
+          snakeKey.includes('amount') || 
+          snakeKey.includes('price') || 
+          snakeKey.includes('balance') || 
+          snakeKey.includes('cost') || 
+          snakeKey.includes('revenue') || 
+          snakeKey.includes('score') || 
+          snakeKey.includes('lat') || 
+          snakeKey.includes('lng') || 
+          snakeKey.includes('hours')
+        ) {
+          type = 'DECIMAL(18,2)';
+        } else {
+          type = 'DOUBLE PRECISION';
+        }
+      } else if (val && (typeof val === 'object' || Array.isArray(val))) {
+        type = 'JSONB';
+      } else if (typeof val === 'string' && !isNaN(Date.parse(val)) && (val.includes('T') || val.includes('-'))) {
+        type = 'TIMESTAMPTZ';
+      } else if (snakeKey.includes('date') || snakeKey.includes('time')) {
+        type = 'TIMESTAMPTZ';
+      }
+      
+      logger.info(`[Auto Schema Adapter] Adding missing column: ${snakeKey} (${type}) to table: ${normalizedTable}`);
+      await client.query(`ALTER TABLE "${normalizedTable}" ADD COLUMN "${snakeKey}" ${type}`);
+    }
+  };
+
+  // 2. Ensure all keys in payload are mapped to columns
+  if (payload && typeof payload === 'object') {
+    for (const key of Object.keys(payload)) {
+      await ensureColumn(key, payload[key]);
+    }
+  }
+
+  // 3. Ensure all keys in queryWhere conditions are mapped to columns
+  if (queryWhere && typeof queryWhere === 'object') {
+    for (const key of Object.keys(queryWhere)) {
+      await ensureColumn(key, queryWhere[key]);
+    }
+  }
+
+  // 4. Ensure orderBy column exists
+  if (options?.orderBy && typeof options.orderBy === 'string') {
+    await ensureColumn(options.orderBy, 'TEXT'); // default fallback value type if we don't know it, but name regex might make it TIMESTAMPTZ
+  }
+}
+
 async function startServer() {
   const app = express();
   // Bound to process.env.PORT in enterprise production environments while maintaining backward compatibility with port 3000
@@ -52,9 +178,11 @@ async function startServer() {
   // Implements strict origin CORS validation rather than wildcard (*) permissions
   const CORS_ALLOW_LIST = [
     'https://nexaledger-portal.com',
-    'https://nexaledger-payment.com',
-    'http://localhost:3000'
+    'https://nexaledger-payment.com'
   ];
+  if (process.env.NODE_ENV !== "production") {
+    CORS_ALLOW_LIST.push('http://localhost:3000');
+  }
   
   app.use(cors({
     origin: (origin, callback) => {
@@ -73,11 +201,23 @@ async function startServer() {
   // Context hydrator middleware capturing correlation and trace tokens
   app.use((req, res, next) => {
     const traceId = req.headers['x-trace-id'] || `trace-${generateUUIDv7()}`;
-    const tenantId = req.headers['x-tenant-id'] || 'tenant-nexa-001';
+    const tenantId = req.headers['x-tenant-id'] as string;
     
-    // Attach tracking properties directly to custom response headers for auditability
-    res.setHeader('X-Trace-ID', traceId);
-    res.setHeader('X-Tenant-ID', tenantId);
+    res.setHeader('X-Trace-ID', traceId as string);
+    
+    // Only require x-tenant-id for actual business API requests
+    const isApiRoute = req.path.startsWith('/api');
+    const isBypassRoute = req.path === "/api/health" || req.path === "/api/jobs/archive";
+    
+    if (isApiRoute && !isBypassRoute) {
+      if (!tenantId) {
+        return res.status(400).json({ status: "ERROR", error: "Missing x-tenant-id header." });
+      }
+      res.setHeader('X-Tenant-ID', tenantId);
+    } else {
+      res.setHeader('X-Tenant-ID', tenantId || "system");
+    }
+    
     next();
   });
 
@@ -124,182 +264,196 @@ async function startServer() {
       }
     };
 
+    const start = Date.now();
+    let dbResult;
+
+    if (!process.env.DATABASE_URL) {
+      return res.status(500).json({ status: "ERROR", error: "DATABASE_URL is required but not set." });
+    }
+
+    const client = await pool.connect();
     try {
       enforceRBAC(operation);
-      const start = Date.now();
-      let result: { rows: any[], rowCount: number } = { rows: [], rowCount: 0 };
+      
+      const currentTenant = res.getHeader('X-Tenant-ID') as string;
+      await client.query("SELECT set_config('app.current_tenant', $1, true)", [currentTenant || ""]);
 
-      if (!process.env.DATABASE_URL) {
-        throw new Error("DATABASE_URL is required but not set.");
+      // Execute dynamic auto schema adaptation before any query
+      if (operation === "TRANSACTION") {
+        const operations = payload?.operations || [];
+        for (const op of operations) {
+          const opTable = op.table?.toLowerCase();
+          if (opTable && /^[a-zA-Z0-9_]+$/.test(opTable)) {
+            await autoAdaptTable(client, opTable, op.payload, undefined, options);
+          }
+        }
+      } else {
+        await autoAdaptTable(client, normalizedTable, payload, options?.where, options);
+      }
+
+      // ---- READ (SELECT) ----
+      if (operation === "SELECT") {
+        let sql = `SELECT * FROM "${normalizedTable}"`;
+        let values: any[] = [];
+        let conditions = ["is_deleted = false"];
+        
+        // Dynamic Row-Level Security (RLS) Appended to SQL
+        if (userRole === "PURCHASING_SPECIALIST" && normalizedTable === "purchase_orders") {
+           conditions.push(`(created_by = $${values.length + 1} OR purchases_representative_id = $${values.length + 2})`);
+           values.push(userEmployeeId, userEmployeeId);
+        }
+        if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory_items" || normalizedTable === "inventory")) {
+           conditions.push(`warehouse_id = $${values.length + 1}`);
+           values.push("warehouse_raw");
+        }
+        if (userRole === "SALES_REP" && normalizedTable === "sales_contracts") {
+           conditions.push(`seller_id = $${values.length + 1}`);
+           values.push(userEmployeeId);
+        }
+        if (userRole === "SALES_REP" && (normalizedTable === "inventory_items" || normalizedTable === "inventory")) {
+           conditions.push(`warehouse_id = $${values.length + 1}`);
+           values.push("warehouse_sales");
+        }
+
+        // Apply external WHERE conditions safely
+        if (options?.where) {
+          for (const [k, v] of Object.entries(options.where)) {
+             if (v === undefined) continue;
+             if (/^[a-zA-Z0-9_]+$/.test(k)) {
+                const snakeCol = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+                conditions.push(`${snakeCol} = $${values.length + 1}`);
+                values.push(v);
+             }
+          }
+        }
+        
+        if (conditions.length > 0) {
+          sql += ` WHERE ${conditions.join(' AND ')}`;
+        }
+        
+        if (options?.orderBy && /^[a-zA-Z0-9_]+$/.test(options.orderBy)) {
+           const snakeOrder = options.orderBy.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
+           const dir = options.orderDir === "desc" ? "DESC" : "ASC";
+           sql += ` ORDER BY ${snakeOrder} ${dir}`;
+        }
+        
+        if (options?.limit && typeof options.limit === "number") {
+           sql += ` LIMIT ${options.limit}`;
+        }
+        
+        dbResult = await client.query(sql, values);
+      } 
+      
+      // ---- CREATE (INSERT) ----
+      else if (operation === "INSERT") {
+        if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
+           payload.warehouseId = "warehouse_raw";
+        }
+        if (userRole === "SALES_REP" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
+           payload.warehouseId = "warehouse_sales";
+        }
+        
+        const keys = Object.keys(payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
+        const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
+        const idx = keys.map((_, i) => '$' + (i+1));
+        const values = keys.map(k => payload[k]);
+
+        const sql = `INSERT INTO "${normalizedTable}" (${snakeKeys.join(', ')}) VALUES (${idx.join(', ')}) RETURNING *`;
+        dbResult = await client.query(sql, values);
+        
+        if (table !== 'audit_logs' && dbResult.rows.length > 0) {
+            await client.query(
+                `INSERT INTO audit_logs (id, table_name, record_id, action, actor_user_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6)`,
+                [generateUUIDv7(), normalizedTable, dbResult.rows[0].id, 'INSERT', userEmployeeId, new Date().toISOString()]
+            );
+        }
       }
       
-      // ==========================================
-      // REAL POSTGRESQL DATABASE ENGINE
-      // ==========================================
-        let dbResult;
+      // ---- UPDATE ----
+      else if (operation === "UPDATE") {
+        if (!id) throw new Error("ID required for UPDATE");
+        
+        if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
+           payload.warehouseId = "warehouse_raw";
+        }
+        if (userRole === "SALES_REP" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
+           payload.warehouseId = "warehouse_sales";
+        }
 
-        // ---- READ (SELECT) ----
-        if (operation === "SELECT") {
-          let sql = `SELECT * FROM "${normalizedTable}"`;
-          let values: any[] = [];
-          let conditions = ["is_deleted = false"];
-          
-          // Dynamic Row-Level Security (RLS) Appended to SQL
-          if (userRole === "PURCHASING_SPECIALIST" && normalizedTable === "purchase_orders") {
-             conditions.push(`(created_by = $${conditions.length + 1} OR purchases_representative_id = $${conditions.length + 1})`);
-             values.push(userEmployeeId);
-          }
-          if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory_items" || normalizedTable === "inventory")) {
-             conditions.push(`warehouse_id = $${conditions.length + 1}`);
-             values.push("warehouse_raw");
-          }
-          if (userRole === "SALES_REP" && normalizedTable === "sales_contracts") {
-             conditions.push(`seller_id = $${conditions.length + 1}`);
-             values.push(userEmployeeId);
-          }
-          if (userRole === "SALES_REP" && (normalizedTable === "inventory_items" || normalizedTable === "inventory")) {
-             conditions.push(`warehouse_id = $${conditions.length + 1}`);
-             values.push("warehouse_sales");
-          }
+        const keys = Object.keys(payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
+        const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
+        const setClauses = snakeKeys.map((k, i) => `${k} = $${i+1}`).join(', ');
+        const values = keys.map(k => payload[k]);
+        values.push(id);
 
-          // Apply external WHERE conditions safely
-          if (options?.where) {
-            for (const [k, v] of Object.entries(options.where)) {
-               if (/^[a-zA-Z0-9_]+$/.test(k)) {
-                  const snakeCol = k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-                  conditions.push(`${snakeCol} = $${conditions.length + 1}`);
-                  values.push(v);
-               }
+        let sql = `UPDATE "${normalizedTable}" SET ${setClauses} WHERE id = $${values.length}`;
+        
+        if (userRole === "PURCHASING_SPECIALIST" && normalizedTable === "purchase_orders") {
+           sql += ` AND (created_by = $${values.length + 1} OR purchases_representative_id = $${values.length + 1})`;
+           values.push(userEmployeeId);
+        }
+
+        sql += ` RETURNING *`;
+        dbResult = await client.query(sql, values);
+        
+        if (table !== 'audit_logs') {
+            await client.query(
+                `INSERT INTO audit_logs (id, table_name, record_id, action, actor_user_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6)`,
+                [generateUUIDv7(), normalizedTable, id, 'UPDATE', userEmployeeId, new Date().toISOString()]
+            );
+        }
+      }
+      
+      // ---- TRANSACTION ----
+      else if (operation === "TRANSACTION") {
+         const operations = payload?.operations || [];
+         await client.query('BEGIN');
+         try {
+            for (const op of operations) {
+                const opTable = op.table?.toLowerCase();
+                if (!opTable || !/^[a-zA-Z0-9_]+$/.test(opTable)) {
+                   throw new Error("Invalid table identity in transactional operation.");
+                }
+                enforceRBAC(op.operation); // check per op
+                
+                if (op.operation === "INSERT") {
+                   const keys = Object.keys(op.payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
+                   const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
+                   const idx = keys.map((_, i) => '$' + (i+1));
+                   const values = keys.map(k => op.payload[k]);
+                   const sql = `INSERT INTO "${opTable}" (${snakeKeys.join(', ')}) VALUES (${idx.join(', ')})`;
+                   await client.query(sql, values);
+                } else if (op.operation === "UPDATE") {
+                   const keys = Object.keys(op.payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
+                   const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
+                   const setClauses = snakeKeys.map((k, i) => `${k} = $${i+1}`).join(', ');
+                   const values = keys.map(k => op.payload[k]);
+                   values.push(op.id);
+                   const sql = `UPDATE "${opTable}" SET ${setClauses} WHERE id = $${values.length}`;
+                   await client.query(sql, values);
+                }
             }
-          }
-          
-          if (conditions.length > 0) {
-            sql += ` WHERE ${conditions.join(' AND ')}`;
-          }
-          
-          if (options?.orderBy && /^[a-zA-Z0-9_]+$/.test(options.orderBy)) {
-             const snakeOrder = options.orderBy.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`);
-             const dir = options.orderDir === "desc" ? "DESC" : "ASC";
-             sql += ` ORDER BY ${snakeOrder} ${dir}`;
-          }
-          
-          if (options?.limit && typeof options.limit === "number") {
-             sql += ` LIMIT ${options.limit}`;
-          }
-          
-          dbResult = await pool.query(sql, values);
-        } 
-        
-        // ---- CREATE (INSERT) ----
-        else if (operation === "INSERT") {
-          if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-             payload.warehouseId = "warehouse_raw";
-          }
-          if (userRole === "SALES_REP" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-             payload.warehouseId = "warehouse_sales";
-          }
-          
-          const keys = Object.keys(payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
-          const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
-          const idx = keys.map((_, i) => '$' + (i+1));
-          const values = keys.map(k => payload[k]);
+            await client.query('COMMIT');
+            dbResult = { rowCount: operations.length, rows: [] };
+         } catch (e) {
+            await client.query('ROLLBACK');
+            throw e;
+         }
+      } 
+      
+      else {
+        throw new Error("Unsupported database operation");
+      }
 
-          const sql = `INSERT INTO "${normalizedTable}" (${snakeKeys.join(', ')}) VALUES (${idx.join(', ')}) RETURNING *`;
-          dbResult = await pool.query(sql, values);
-          
-          if (table !== 'audit_logs' && dbResult.rows.length > 0) {
-              await pool.query(
-                  `INSERT INTO audit_logs (id, table_name, record_id, action, actor_user_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6)`,
-                  [generateUUIDv7(), normalizedTable, dbResult.rows[0].id, 'INSERT', userEmployeeId, new Date().toISOString()]
-              );
-          }
-        }
-        
-        // ---- UPDATE ----
-        else if (operation === "UPDATE") {
-          if (!id) throw new Error("ID required for UPDATE");
-          
-          if (userRole === "PURCHASING_SPECIALIST" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-             payload.warehouseId = "warehouse_raw";
-          }
-          if (userRole === "SALES_REP" && (normalizedTable === "inventory" || normalizedTable === "inventory_items")) {
-             payload.warehouseId = "warehouse_sales";
-          }
-
-          const keys = Object.keys(payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
-          const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
-          const setClauses = snakeKeys.map((k, i) => `${k} = $${i+1}`).join(', ');
-          const values = keys.map(k => payload[k]);
-          values.push(id);
-
-          let sql = `UPDATE "${normalizedTable}" SET ${setClauses} WHERE id = $${values.length}`;
-          
-          if (userRole === "PURCHASING_SPECIALIST" && normalizedTable === "purchase_orders") {
-             sql += ` AND (created_by = $${values.length + 1} OR purchases_representative_id = $${values.length + 1})`;
-             values.push(userEmployeeId);
-          }
-
-          sql += ` RETURNING *`;
-          dbResult = await pool.query(sql, values);
-          
-          if (table !== 'audit_logs') {
-              await pool.query(
-                  `INSERT INTO audit_logs (id, table_name, record_id, action, actor_user_id, timestamp) VALUES ($1, $2, $3, $4, $5, $6)`,
-                  [generateUUIDv7(), normalizedTable, id, 'UPDATE', userEmployeeId, new Date().toISOString()]
-              );
-          }
-        }
-        
-        // ---- TRANSACTION ----
-        else if (operation === "TRANSACTION") {
-           const operations = payload?.operations || [];
-           const client = await pool.connect();
-           try {
-              await client.query('BEGIN');
-              for (const op of operations) {
-                  const opTable = op.table?.toLowerCase();
-                  enforceRBAC(op.operation); // check per op
-                  
-                  if (op.operation === "INSERT") {
-                     const keys = Object.keys(op.payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
-                     const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
-                     const idx = keys.map((_, i) => '$' + (i+1));
-                     const values = keys.map(k => op.payload[k]);
-                     const sql = `INSERT INTO ${opTable} (${snakeKeys.join(', ')}) VALUES (${idx.join(', ')})`;
-                     await client.query(sql, values);
-                  } else if (op.operation === "UPDATE") {
-                     const keys = Object.keys(op.payload).filter(k => /^[a-zA-Z0-9_]+$/.test(k));
-                     const snakeKeys = keys.map(k => k.replace(/[A-Z]/g, letter => `_${letter.toLowerCase()}`));
-                     const setClauses = snakeKeys.map((k, i) => `${k} = $${i+1}`).join(', ');
-                     const values = keys.map(k => op.payload[k]);
-                     values.push(op.id);
-                     const sql = `UPDATE ${opTable} SET ${setClauses} WHERE id = $${values.length}`;
-                     await client.query(sql, values);
-                  }
-              }
-              await client.query('COMMIT');
-              dbResult = { rowCount: operations.length, rows: [] };
-           } catch (e) {
-              await client.query('ROLLBACK');
-              throw e;
-           } finally {
-              client.release();
-           }
-        } 
-        
-        else {
-          throw new Error("Unsupported database operation");
-        }
-
-        const durationMs = Date.now() - start;
-        logger.info(`[PostgreSQL] ${operation} execution`, { traceId, table: normalizedTable, durationMs });
-        
-        res.status(200).json({
-          status: "SUCCESS",
-          rows: dbResult.rows || [],
-          rowCount: dbResult.rowCount || 0,
-          executionTimeMs: durationMs
-        });
+      const durationMs = Date.now() - start;
+      logger.info(`[PostgreSQL] ${operation} execution`, { traceId, table: normalizedTable, durationMs });
+      
+      res.status(200).json({
+        status: "SUCCESS",
+        rows: dbResult.rows || [],
+        rowCount: dbResult.rowCount || 0,
+        executionTimeMs: durationMs
+      });
       
     } catch (err: any) {
       logger.error(`[Database Core] Execution Failure`, { traceId, error: err.message });
@@ -307,6 +461,8 @@ async function startServer() {
         status: "ERROR",
         error: err.message || String(err)
       });
+    } finally {
+      client.release();
     }
   });
 
@@ -349,10 +505,15 @@ async function startServer() {
   app.post("/api/jobs/archive", async (req, res) => {
     const traceId = res.getHeader('X-Trace-ID');
     const cronAuthToken = req.headers['x-cron-auth'];
-    const expectedSecret = process.env.CRON_SECRET || 'NEXA_CRON_DEFAULT_SECRET_2026';
+    const expectedSecret = process.env.CRON_SECRET;
     
-    // Validate request authority (allow dev/localhost as safe fallback, otherwise reject)
-    if (process.env.NODE_ENV === "production" && cronAuthToken !== expectedSecret) {
+    if (!expectedSecret) {
+      logger.error("[GCP Cloud Function Trigger] Configuration Error: CRON_SECRET environment variable is missing.");
+      return res.status(500).json({ error: "Configuration Error: CRON_SECRET is missing." });
+    }
+    
+    // Validate request authority
+    if (cronAuthToken !== expectedSecret) {
       logger.warn("[GCP Cloud Function Trigger] UNAUTHORIZED ARCHIVE RUN ATTEMPT", { traceId });
       return res.status(403).json({ error: "Access Denied: Invalid cloud scheduling security token." });
     }
@@ -398,9 +559,15 @@ async function startServer() {
         return res.status(400).json({ error: "Cryptographic rejection: Biometric signature timestamp deviation exceeds secure limit." });
       }
 
+      const biometricSalt = process.env.BIOMETRIC_SALT;
+      if (!biometricSalt) {
+         logger.error("[Biometric Proxy] Configuration Error: BIOMETRIC_SALT environment variable is missing.");
+         return res.status(500).json({ error: "Configuration Error: BIOMETRIC_SALT has not been configured." });
+      }
+
       // Hash sensitive fingerprint strings with server-side salt to prevent biometric PII exposures
       const securePiiStamp = fingerprintHash 
-        ? crypto.createHmac('sha256', process.env.BIOMETRIC_SALT || 'BIOMETRIC_SALT_V7').update(fingerprintHash).digest('hex') 
+        ? crypto.createHmac('sha256', biometricSalt).update(fingerprintHash).digest('hex') 
         : null;
 
       res.status(200).json({ 

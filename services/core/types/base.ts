@@ -33,7 +33,7 @@ export type TableName =
     | 'qc_inspections' | 'support_tickets' | 'simulation_runs' | 'partner_ledger'
     | 'branches' | 'geofences' | 'attendance' | 'anti_spoof_logs' | 'attendance_logs'
     | 'cost_centers' | 'landed_costs' | 'production_runs' | 'stock_transfers'
-    | 'saas_revenues' | 'saas_expenses' | 'kpi_objectives';
+    | 'saas_revenues' | 'saas_expenses' | 'kpi_objectives' | 'outbox_events' | 'profit_centers' | 'financial_projects';
 
 export interface QueryOptions {
     where?: Record<string, any>;
