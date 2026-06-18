@@ -1,2 +1,0 @@
-- project setup
-- initial architectural review

@@ -136,10 +136,13 @@ async function autoAdaptTable(client: any, tableName: string, payload?: any, que
         }
       } else if (val && (typeof val === 'object' || Array.isArray(val))) {
         type = 'JSONB';
-      } else if (typeof val === 'string' && !isNaN(Date.parse(val)) && (val.includes('T') || val.includes('-'))) {
+      } else if (typeof val === 'string' && /^\\d{4}-\\d{2}-\\d{2}/.test(val) && !isNaN(Date.parse(val))) {
         type = 'TIMESTAMPTZ';
-      } else if (snakeKey.includes('date') || snakeKey.includes('time')) {
-        type = 'TIMESTAMPTZ';
+      } else if (typeof val === 'string' && (snakeKey.includes('date') || snakeKey.includes('time') || snakeKey.endsWith('_at'))) {
+        type = 'TEXT';
+        if (/^\\d/.test(val) && !isNaN(Date.parse(val))) {
+           type = 'TIMESTAMPTZ';
+        }
       }
       
       logger.info(`[Auto Schema Adapter] Adding missing column: ${snakeKey} (${type}) to table: ${normalizedTable}`);

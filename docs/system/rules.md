@@ -1,9 +1,0 @@
-- ممنوع أي feature بدون tenant_id
-- ممنوع أي client-side security أو الاعتماد على localStorage لتحديد الـ Role أو الـ Tenant
-- أي Audit لازم يطلع من Backend بعد الـ Commit
-- استخدام UUIDv7 فقط في الـ ID generation
-- ممنوع الـ Hardcoded Workflows
-- كل عملية لازم تمر عبر issue file
-- أي task لازم يكون لها acceptance criteria
-- أي feature تعتبر غير موجودة لو مش مكتوبة في /issues
-- ممنوع التعديل على core بدون sprint approval
