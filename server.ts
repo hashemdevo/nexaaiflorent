@@ -136,11 +136,11 @@ async function autoAdaptTable(client: any, tableName: string, payload?: any, que
         }
       } else if (val && (typeof val === 'object' || Array.isArray(val))) {
         type = 'JSONB';
-      } else if (typeof val === 'string' && /^\\d{4}-\\d{2}-\\d{2}/.test(val) && !isNaN(Date.parse(val))) {
+      } else if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}/.test(val) && !isNaN(Date.parse(val))) {
         type = 'TIMESTAMPTZ';
       } else if (typeof val === 'string' && (snakeKey.includes('date') || snakeKey.includes('time') || snakeKey.endsWith('_at'))) {
         type = 'TEXT';
-        if (/^\\d/.test(val) && !isNaN(Date.parse(val))) {
+        if (/^\d/.test(val) && !isNaN(Date.parse(val))) {
            type = 'TIMESTAMPTZ';
         }
       }
@@ -674,21 +674,21 @@ ${JSON.stringify({ payRun, samples }, null, 2)}
     
     // Background daemon simulating the Cloud Function running every 30 days automatically.
     // In multi-replica cloud orchestrations, horizontal scale settings should disable local timers in favor of external triggers.
-    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const MAXIMUM_SAFE_TIMEOUT = 2147483647; // Max 32-bit signed integer for setTimeout
     const isSingleInstance = !process.env.HORIZONTAL_REPLICAS || parseInt(process.env.HORIZONTAL_REPLICAS, 10) <= 1;
     
     if (isSingleInstance) {
       setInterval(async () => {
         try {
-          logger.info("[Background Cloud Function Daemon] Running 30-day periodic audit logs maintenance...");
+          logger.info("[Background Cloud Function Daemon] Running periodic audit logs maintenance...");
           const count = await DataArchiver.archiveAuditLogs(365);
           logger.info(`[Background Cloud Function Daemon] Maintenance complete. Cleaned and archived ${count} audit log entries.`);
         } catch (e: any) {
           logger.error("[Background Cloud Function Daemon] Maintenance process error", { error: e.message || e });
         }
-      }, THIRTY_DAYS_MS);
+      }, MAXIMUM_SAFE_TIMEOUT);
       
-      logger.info("[Scheduler Engine Launched] Registered 30-day DataArchiver Cloud Function check.");
+      logger.info("[Scheduler Engine Launched] Registered DataArchiver Cloud Function check.");
     } else {
       logger.info("[Scheduler Engine Standby] Microservice is horizontally scaled. Relying strictly on external GCP Cron calls.");
     }

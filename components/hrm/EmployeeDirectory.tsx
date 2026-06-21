@@ -141,9 +141,10 @@ export const EmployeeDirectory: React.FC = () => {
       
       // If empty, seed realistic mock corporate data to demonstrate ERP compliance
       if (!records || records.length === 0) {
+        const uniqueId = () => 'emp-nexa-' + Math.random().toString(36).substr(2, 9);
         const seedStaff: EmployeeProfile[] = [
           {
-            id: 'emp-nexa-1001',
+            id: uniqueId(),
             tenantId: 'tenant-nexa-001',
             employeeCode: 'NEX-EMP-001',
             firstName: 'Abdulaziz',
@@ -180,7 +181,7 @@ export const EmployeeDirectory: React.FC = () => {
             version: 1
           },
           {
-            id: 'emp-nexa-1002',
+            id: uniqueId(),
             tenantId: 'tenant-nexa-001',
             employeeCode: 'NEX-EMP-002',
             firstName: 'Sarah',
@@ -217,7 +218,7 @@ export const EmployeeDirectory: React.FC = () => {
             version: 1
           },
           {
-            id: 'emp-nexa-1003',
+            id: uniqueId(),
             tenantId: 'tenant-nexa-001',
             employeeCode: 'NEX-EMP-003',
             firstName: 'Tariq',

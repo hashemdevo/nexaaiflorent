@@ -1,0 +1,1 @@
+export const WarehouseService = new Proxy(function(){}, { get: () => new Proxy(function(){}, { get: () => () => ({})}), apply: () => ({}) });

@@ -1,0 +1,1 @@
+export const SimulationFeedbackService = new Proxy(function(){}, { get: () => new Proxy(function(){}, { get: () => () => ({})}), apply: () => ({}) });
